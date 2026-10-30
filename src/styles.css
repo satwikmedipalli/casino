@@ -345,3 +345,8 @@ input[type=range] { width: 100%; accent-color: var(--gold); height: 28px; }
   user-select: text; -webkit-user-select: text;
 }
 .target-input:focus { border-color: var(--gold); }
+
+/* ---------- wide screens (laptops) ---------- */
+.lobby > .field { flex: none; }
+.actions, .hand-area { width: 100%; max-width: 520px; margin-left: auto; margin-right: auto; }
+.sheet { max-width: 560px; margin: 0 auto; }
