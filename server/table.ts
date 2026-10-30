@@ -216,7 +216,8 @@ export class Room {
     if (!this.player(this.hostId)) this.hostId = this.players[0]?.id ?? '';
     this.hand = null;
     const eligible = this.players.filter(p => p.chips > 0);
-    if (eligible.length < 2) {
+    // Nobody's looking: stop dealing until someone comes back and the host restarts.
+    if (eligible.length < 2 || !this.players.some(p => p.connected)) {
       this.phase = 'lobby';
       this.dealerId = null;
       this.turnDeadline = null;

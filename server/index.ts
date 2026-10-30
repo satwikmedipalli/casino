@@ -113,7 +113,7 @@ setInterval(() => {
   const now = Date.now();
   for (const [code, room] of rooms) {
     if (room.players.some(p => p.connected) || !lastSeen.has(code)) lastSeen.set(code, now);
-    else if (now - lastSeen.get(code)! > 60 * 60_000) { rooms.delete(code); lastSeen.delete(code); }
+    else if (now - lastSeen.get(code)! > 60 * 60_000) { room.dispose(); rooms.delete(code); lastSeen.delete(code); }
   }
 }, 60_000);
 
