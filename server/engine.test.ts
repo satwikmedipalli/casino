@@ -287,3 +287,39 @@ test('High-Low pays the best High hand and the worst Low hand', () => {
   assert.deepEqual(room.hand!.winners.map(x => [room.player(x.id)!.name, x.amount]), [['P0', 40]]);
   room.dispose();
 });
+
+test('practice: bots play 200 hands of every game without losing or creating chips', () => {
+  const room = new Room('PRAC', 1000, 20, () => {});
+  const me = room.addPlayer('Me');
+  room.practice = true;
+  room.addBots(5);
+  room.start(me.id);
+  const games = ['holdem', 'irish', 'three_card', 'ak47', 'triple9', 'triple9_custom', 'omaha5', 'omaha6', 'double_board', 'high_low'] as const;
+  const r = room as any;
+  for (let hand = 0; hand < 200; hand++) {
+    assert.equal(room.phase, 'choosing');
+    assert.equal(room.chooserId, me.id); // the human always picks in practice
+    const game = games[hand % games.length];
+    const before = room.players.reduce((t, p) => t + p.chips, 0);
+    room.choose(me.id, game, game === 'triple9_custom' ? 300 : undefined, hand % 2 === 0);
+    for (let step = 0; step < 300 && (room.phase as string) === 'playing'; step++) {
+      const h = room.hand!;
+      if (h.pending) {
+        for (const x of h.hp.values()) if (!x.folded && !x.ready) r.autoPending(x);
+        r.finishPending();
+      } else if (h.toAct === me.id) {
+        room.act(me.id, 'call');
+      } else if (h.toAct) {
+        const d = r.botDecide(h.toAct);
+        try { room.act(h.toAct, d.action, d.amount); } catch { room.act(h.toAct, 'call'); }
+      } else {
+        r.endStreet(); // all-in runout
+      }
+    }
+    assert.equal(room.phase, 'showdown', `hand ${hand} (${game}) did not finish`);
+    assert.equal(room.players.reduce((t, p) => t + p.chips, 0), before, `hand ${hand} (${game}) changed the chip total`);
+    r.nextHand();
+    if (me.chips === 0) me.chips = 1000;
+  }
+  room.dispose();
+});

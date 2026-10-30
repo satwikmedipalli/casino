@@ -52,14 +52,20 @@ function handle(ws: WebSocket, msg: ClientMsg) {
     const room: Room = new Room(code, startingChips, bb, () => broadcast(room));
     rooms.set(code, room);
     const p = room.addPlayer(msg.name);
+    if (msg.bots) {
+      room.practice = true;
+      room.addBots(msg.bots);
+    }
     attach(ws, room, p.id);
     send(ws, { t: 'joined', code, token: p.token });
+    if (room.practice) room.start(p.id);
     broadcast(room);
     return;
   }
   if (msg.t === 'join') {
     const room = rooms.get(String(msg.code).toUpperCase());
     if (!room) return send(ws, { t: 'error', message: 'Table not found', fatal: true });
+    if (room.practice && !msg.token) return send(ws, { t: 'error', message: "That's a practice table" });
     const existing = msg.token ? room.byToken(msg.token) : undefined;
     const p = existing ?? room.addPlayer(msg.name);
     attach(ws, room, p.id);
@@ -82,6 +88,7 @@ function handle(ws: WebSocket, msg: ClientMsg) {
       room.leave(s.playerId);
       sockets.delete(ws);
       send(ws, { t: 'left' });
+      if (room.practice) { room.dispose(); rooms.delete(room.code); return; }
       break;
   }
   broadcast(room);

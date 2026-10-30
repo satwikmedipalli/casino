@@ -19,7 +19,7 @@ export interface Poker {
   error: string | null;
   clearError: () => void;
   send: (msg: ClientMsg) => void;
-  create: (name: string, startingChips: number, bb: number) => void;
+  create: (name: string, startingChips: number, bb: number, bots?: number) => void;
   join: (code: string, name: string) => void;
 }
 
@@ -96,7 +96,7 @@ export function usePoker(): Poker {
     state, receivedAt, connected, hasSession, error,
     clearError: () => setError(null),
     send,
-    create: (name, startingChips, bb) => { pendingName.current = name; send({ t: 'create', name, startingChips, bb }); },
+    create: (name, startingChips, bb, bots) => { pendingName.current = name; send({ t: 'create', name, startingChips, bb, bots }); },
     join: (code, name) => { pendingName.current = name; send({ t: 'join', code: code.trim().toUpperCase(), name }); },
   };
 }

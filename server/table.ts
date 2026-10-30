@@ -46,7 +46,11 @@ interface Player {
   chips: number;
   connected: boolean;
   leaving: boolean;
+  bot: boolean;
 }
+
+const BOT_NAMES = ['Maverick', 'Queenie', 'Lucky', 'Dutch', 'Rio', 'Sly', 'Ace'];
+const PRACTICE_CHOOSE_MS = 10 * 60_000;
 
 interface HandPlayer {
   id: string;
@@ -107,7 +111,24 @@ export class Room {
 
   get sb() { return Math.max(1, Math.floor(this.bb / 2)); }
 
-  dispose() { if (this.timer) clearTimeout(this.timer); this.timer = null; }
+  /** Practice tables: bots fill the seats and the human picks every game. */
+  practice = false;
+  chooserId: string | null = null;
+  private botTimer: NodeJS.Timeout | null = null;
+
+  dispose() {
+    if (this.timer) clearTimeout(this.timer);
+    if (this.botTimer) clearTimeout(this.botTimer);
+    this.timer = null;
+    this.botTimer = null;
+  }
+
+  addBots(count: number) {
+    for (const name of BOT_NAMES.slice(0, Math.max(1, Math.min(7, count)))) {
+      const b = this.addPlayer(name);
+      b.bot = true;
+    }
+  }
 
   // ---------- seating ----------
 
@@ -118,7 +139,7 @@ export class Room {
     while (used.has(seat)) seat++;
     const p: Player = {
       id: randomUUID(), token: randomUUID(), name: name.trim().slice(0, 14) || 'Player',
-      seat, chips: this.startingChips, connected: true, leaving: false,
+      seat, chips: this.startingChips, connected: true, leaving: false, bot: false,
     };
     this.players.push(p);
     this.players.sort((a, b) => a.seat - b.seat);
@@ -187,7 +208,7 @@ export class Room {
 
   choose(by: string, game: GameId, target?: number, farthest?: boolean) {
     if (this.phase !== 'choosing') throw new GameError('Not choosing right now');
-    if (by !== this.dealerId) throw new GameError('Only the dealer picks the game');
+    if (by !== this.chooserId) throw new GameError('Only the dealer picks the game');
     const info = GAMES.find(g => g.id === game);
     if (!info?.ready) throw new GameError('That game is coming soon');
     let t: Target | null = null;
@@ -205,19 +226,24 @@ export class Room {
     this.dealerId = dealer.id;
     this.dealerSeat = dealer.seat;
     this.phase = 'choosing';
-    this.turnDeadline = Date.now() + CHOOSE_MS;
-    this.turnTotal = CHOOSE_MS;
+    this.chooserId = this.practice ? this.players.find(p => !p.bot)?.id ?? dealer.id : dealer.id;
+    const ms = this.practice ? PRACTICE_CHOOSE_MS : CHOOSE_MS;
+    this.turnDeadline = Date.now() + ms;
+    this.turnTotal = ms;
     this.say(`${dealer.name} is dealing`);
-    this.schedule(CHOOSE_MS, () => { if (this.phase === 'choosing') this.startHand('holdem'); });
+    this.schedule(ms, () => { if (this.phase === 'choosing') this.startHand('holdem'); });
   }
 
   private nextHand() {
     this.players = this.players.filter(p => !p.leaving);
     if (!this.player(this.hostId)) this.hostId = this.players[0]?.id ?? '';
     this.hand = null;
+    for (const b of this.players) {
+      if (b.bot && b.chips === 0) { b.chips = this.startingChips; this.say(`${b.name} rebought`); }
+    }
     const eligible = this.players.filter(p => p.chips > 0);
     // Nobody's looking: stop dealing until someone comes back and the host restarts.
-    if (eligible.length < 2 || !this.players.some(p => p.connected)) {
+    if (eligible.length < 2 || !this.players.some(p => p.connected && !p.bot)) {
       this.phase = 'lobby';
       this.dealerId = null;
       this.turnDeadline = null;
@@ -435,6 +461,14 @@ export class Room {
       for (const x of this.live()) if (!x.ready) this.autoPending(x);
       this.finishPending();
     });
+    if (this.live().some(x => this.player(x.id)?.bot)) {
+      this.botSchedule(() => {
+        if (this.handNo !== handNo || this.hand?.street !== street || !this.hand.pending) return;
+        const bots = this.live().filter(x => !x.ready && this.player(x.id)?.bot);
+        for (const x of bots) this.autoPending(x);
+        if (this.live().every(l => l.ready)) this.finishPending();
+      });
+    }
   }
 
   /** Time ran out: drop the lowest cards (or lowest pair), keep the order for arranging. */
@@ -545,6 +579,67 @@ export class Room {
       const x = this.hand.hp.get(id)!;
       this.act(id, x.bet >= this.hand.currentBet ? 'check' : 'fold');
     });
+    if (this.player(id)?.bot) {
+      this.botSchedule(() => {
+        if (this.handNo !== handNo || this.hand?.toAct !== id || this.phase !== 'playing') return;
+        const d = this.botDecide(id);
+        try { this.act(id, d.action, d.amount); } catch { this.act(id, 'call'); }
+      });
+    }
+  }
+
+  // ---------- practice bots ----------
+
+  private botSchedule(fn: () => void) {
+    if (this.botTimer) clearTimeout(this.botTimer);
+    // A short, slightly random pause so bots feel like people thinking.
+    this.botTimer = setTimeout(() => {
+      this.botTimer = null;
+      try { fn(); } catch (e) { console.error(e); }
+      this.onChange();
+    }, 900 + Math.random() * 1100);
+    this.botTimer.unref();
+  }
+
+  /** Rough 0..1 hand strength: good enough to make bots play sensibly, not well. */
+  private botStrength(x: HandPlayer): number {
+    const h = this.hand!;
+    const catStrength = (score: number) => [0.2, 0.45, 0.62, 0.74, 0.8, 0.85, 0.92, 0.97, 1][Math.floor(score / 15 ** 5)] ?? 0.3;
+    if (h.board.length === 0) {
+      const vals = x.hole.map(rankValue).sort((a, b) => b - a);
+      const pair = vals.some((v, i) => vals.indexOf(v) !== i);
+      const top = (vals[0] + (vals[1] ?? 0)) / 28;
+      return Math.min(1, (pair ? 0.55 : 0.15) + top * 0.4 + (h.game === 'ak47' ? 0.1 : 0));
+    }
+    const kind = RULES[h.game].split;
+    if (!kind) return catStrength(this.evaluate(x).score);
+    const halves = this.halves(x);
+    if (kind === 'triple9') return (Math.min(1, 1 - Math.abs(halves[0].score) / 500) + catStrength(halves[1].score)) / 2;
+    if (kind === 'highlow') return (catStrength(halves[0].score) + (halves[1].score > -(15 ** 5) ? 0.7 : 0.2)) / 2;
+    return (catStrength(halves[0].score) + catStrength(halves[1].score)) / 2;
+  }
+
+  private botDecide(id: string): { action: Action; amount?: number } {
+    const h = this.hand!;
+    const x = h.hp.get(id)!;
+    const p = this.player(id)!;
+    const toCall = h.currentBet - x.bet;
+    let pot = 0;
+    for (const o of h.hp.values()) pot += o.total;
+    const strength = this.botStrength(x) + (Math.random() - 0.5) * 0.15;
+    const r = Math.random();
+    const raiseTo = () => {
+      const want = h.currentBet + Math.max(h.minRaise, Math.round((pot * (0.4 + r * 0.4)) / this.sb) * this.sb);
+      return Math.min(want, x.bet + p.chips);
+    };
+    if (toCall <= 0) {
+      if ((strength > 0.68 && r < 0.65) || r < 0.07) return { action: 'raise', amount: raiseTo() };
+      return { action: 'check' };
+    }
+    const price = toCall / (pot + toCall);
+    if (strength > 0.85 && r < 0.45) return { action: 'raise', amount: raiseTo() };
+    if (strength > price + 0.12 || r < 0.08 || toCall <= this.bb) return { action: 'call' };
+    return { action: 'fold' };
   }
 
   private endStreet() {
@@ -666,7 +761,7 @@ export class Room {
         cards = x.hole.map(c => (show ? c : null));
       }
       return {
-        id: p.id, name: p.name, chips: p.chips, connected: p.connected,
+        id: p.id, name: p.name, chips: p.chips, connected: p.connected, bot: p.bot,
         inHand: !!x, folded: !!x?.folded, allIn: !!x?.allIn, bet: x?.bet ?? 0, cards,
         handName: h?.revealed && x && !x.folded ? x.handName : undefined,
         won: x?.won || undefined,
@@ -697,6 +792,8 @@ export class Room {
       handNo: this.handNo,
       street: h?.street ?? null,
       dealerId: this.dealerId,
+      chooserId: this.chooserId,
+      practice: this.practice,
       sbId: h?.sbId ?? null,
       bbId: h?.bbId ?? null,
       seats,

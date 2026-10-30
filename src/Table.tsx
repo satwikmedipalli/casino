@@ -9,11 +9,26 @@ type Pt = { x: number; y: number };
 type Vars = React.CSSProperties & Record<`--${string}`, string | number>;
 interface Ghost { key: string; amount: number; from: Pt; to: Pt; delay: number }
 
-const RATIO = 0.62; // table width / height (portrait oval)
+const TALL = 0.62; // phone: tall oval (width / height)
+const WIDE = 1.9;  // laptop: wide oval
 const SWIPE = 60;
 
 const gameName = (id: string | null) => GAMES.find(g => g.id === id)?.name ?? 'Poker Night';
 const initials = (name: string) => name.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
+/** A stable color per player so everyone is easy to tell apart. */
+const hueOf = (name: string) => [...name].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
+
+/** Gold ring around the avatar that drains while it's that player's turn. */
+function TimerRing({ left, total }: { left: number; total: number }) {
+  const C = 2 * Math.PI * 27;
+  return (
+    <svg className="timer-ring" viewBox="0 0 60 60">
+      <circle cx="30" cy="30" r="27" style={{
+        strokeDasharray: C, '--c0': `${C * (1 - left / total)}`, '--c1': `${C}`, animationDuration: `${left}ms`,
+      } as Vars} />
+    </svg>
+  );
+}
 
 async function shareTable(code: string, toast: (m: string) => void) {
   const url = `${location.origin}/?code=${code}`;
@@ -36,14 +51,16 @@ export function Table({ poker }: { poker: Poker }) {
 
   // ---- table size ----
   const wrapRef = useRef<HTMLDivElement>(null);
-  const [size, setSize] = useState({ w: 280, h: 280 / RATIO });
+  const [size, setSize] = useState({ w: 280, h: 280 / TALL, wide: false });
   useLayoutEffect(() => {
     const el = wrapRef.current!;
     const measure = () => {
-      const W = el.clientWidth - 70;
-      const H = el.clientHeight - 96;
-      const w = Math.max(180, Math.min(W, H * RATIO));
-      setSize({ w, h: w / RATIO });
+      const W = el.clientWidth - 90;
+      const H = el.clientHeight - 120;
+      const wide = W > H * 1.2;
+      const ratio = wide ? WIDE : TALL;
+      const w = Math.max(180, Math.min(W, H * ratio));
+      setSize({ w, h: w / ratio, wide });
     };
     measure();
     const ro = new ResizeObserver(measure);
@@ -63,23 +80,32 @@ export function Table({ poker }: { poker: Poker }) {
       const a = Math.PI / 2 + (k * 2 * Math.PI) / n;
       const at = (f: number, da = 0, fy = f): Pt => ({ x: cx + rx * f * Math.cos(a + da), y: cy + ry * fy * Math.sin(a + da) });
       // Seats pulled in a little top and bottom so cards above the top seat clear the header.
-      map.set(seat.id, { seat: at(1, 0, 0.93), bet: at(0.62), button: at(0.76, 0.35) });
+      // Upper and side seats have their name plate below them, so their bets sit further in.
+      const sin = Math.sin(a);
+      map.set(seat.id, size.wide
+        ? { seat: at(1.02, 0, 0.98), bet: at(sin < -0.3 ? 0.52 : 0.66), button: at(0.8, 0.22) }
+        : { seat: at(1, 0, 0.93), bet: at(sin < 0.5 ? 0.46 : 0.62), button: at(0.76, 0.35) });
     });
     return map;
-  }, [ids, meIndex, size.w, size.h]);
+  }, [ids, meIndex, size.w, size.h, size.wide]);
   const center: Pt = { x: size.w / 2, y: size.h / 2 };
-  // Leave room for the side seats so their cards never cover the board.
-  const boardW = Math.min(52, (size.w - 92) / 5.3);
-  const cardH = boardW * 1.4;
   const twoBoards = s.split === 'double' || s.split === 'highlow';
-  const boards = twoBoards
-    ? [
-        { cards: s.board, y: center.y - cardH / 2 - 8, label: s.split === 'highlow' ? 'HIGH' : 'BOARD 1' },
-        { cards: s.board2, y: center.y + cardH / 2 + 8, label: s.split === 'highlow' ? 'LOW' : 'BOARD 2' },
-      ]
-    : [{ cards: s.board, y: center.y, label: '' }];
-  const potPt: Pt = { x: size.w / 2, y: twoBoards ? center.y - cardH - 64 : center.y - size.w * 0.27 };
-  const miniW = Math.min(26, size.w * 0.085);
+  // Leave room for the side seats so their cards never cover the board.
+  const boardW = size.wide
+    ? Math.min(twoBoards ? 50 : 64, (size.w * (twoBoards ? 0.74 : 0.5)) / (twoBoards ? 11 : 5.4))
+    : Math.min(52, (size.w - 92) / 5.3);
+  const cardH = boardW * 1.4;
+  const labels = s.split === 'highlow' ? ['HIGH', 'LOW'] : ['BOARD 1', 'BOARD 2'];
+  const rowW = boardW * 5 + 16;
+  const boards = !twoBoards
+    ? [{ cards: s.board, x: center.x, y: center.y, label: '' }]
+    : size.wide // side by side on a wide table, stacked on a tall one
+      ? [0, 1].map(i => ({ cards: i ? s.board2 : s.board, x: center.x + (i ? 1 : -1) * (rowW / 2 + 10), y: center.y + 6, label: labels[i] }))
+      : [0, 1].map(i => ({ cards: i ? s.board2 : s.board, x: center.x, y: center.y + (i ? 1 : -1) * (cardH / 2 + 10), label: labels[i] }));
+  const potPt: Pt = size.wide
+    ? { x: center.x, y: center.y - cardH / 2 - 44 }
+    : { x: center.x, y: twoBoards ? center.y - cardH - 64 : center.y + cardH / 2 + 34 };
+  const miniW = size.wide ? 30 : Math.min(26, size.w * 0.085);
 
   // ---- sounds and chip movement driven by state changes ----
   const prevRef = useRef<TableView | null>(null);
@@ -153,7 +179,9 @@ export function Table({ poker }: { poker: Poker }) {
   return (
     <div className="screen">
       <header className="topbar">
-        <button className="pill" onClick={() => shareTable(s.code, toastFn)}>⧉ {s.code}</button>
+        {s.practice
+          ? <span className="pill gold">Practice</span>
+          : <button className="pill gold" onClick={() => shareTable(s.code, toastFn)}>Invite · {s.code}</button>}
         <div className="title">
           <div>{gameName(s.game)}</div>
           <small>
@@ -167,11 +195,13 @@ export function Table({ poker }: { poker: Poker }) {
       {!poker.connected && <div className="reconnecting">Reconnecting…</div>}
 
       <div className="table-wrap" ref={wrapRef}>
-        <div className="table" style={{ width: size.w, height: size.h }}>
-          <div className="felt-logo">POKER NIGHT</div>
+        <div className={`table ${size.wide ? 'wide' : ''}`} style={{ width: size.w, height: size.h }}>
+          <div className="rail" />
+          <div className="felt" />
+          <div className="felt-logo">Poker Night</div>
 
           {boards.map((b, bi) => (
-          <div key={bi} className="board" style={{ left: center.x, top: b.y }}>
+          <div key={bi} className="board" style={{ left: b.x, top: b.y }}>
             {b.label && <span className={`board-label ${b.label === 'LOW' ? 'low' : ''}`}>{b.label}</span>}
             {[0, 1, 2, 3, 4].map(i => b.cards[i]
               ? <CardView key={`${s.handNo}-${bi}-${i}`} card={b.cards[i]} width={boardW} className="flip-in" wild={isWild(b.cards[i])}
@@ -225,16 +255,16 @@ export function Table({ poker }: { poker: Poker }) {
                     })}
                   </div>
                 )}
-                <div className="avatar">{initials(seat.name)}</div>
+                <div className="avatar" style={{ '--hue': hueOf(seat.name) } as Vars}>
+                  {initials(seat.name)}
+                  {acting && s.turnMsLeft != null && (
+                    <TimerRing key={`${s.handNo}-${s.street}-${s.currentBet}-${seat.id}`} left={s.turnMsLeft} total={s.turnMsTotal} />
+                  )}
+                </div>
                 <div className="plate">
-                  <div className="name">{isMe ? 'You' : seat.name}</div>
+                  <div className="name">{isMe ? 'You' : seat.name}{seat.bot && <em className="bot-tag">BOT</em>}</div>
                   <div className="chips-amt">{seat.allIn && s.phase === 'playing' ? 'ALL IN' : fmt(seat.chips)}</div>
                 </div>
-                {acting && s.turnMsLeft != null && (
-                  <div className="timer" key={`${s.handNo}-${s.street}-${s.currentBet}-${seat.id}`}>
-                    <i style={{ '--from': s.turnMsLeft / s.turnMsTotal, animationDuration: `${s.turnMsLeft}ms` } as Vars} />
-                  </div>
-                )}
                 {seat.handName && !isMe && !s.split && <div className="hand-name">{seat.handName}</div>}
                 {!seat.connected && <div className="away-tag">away</div>}
                 {seat.waiting && <div className="away-tag">choosing…</div>}
@@ -245,7 +275,7 @@ export function Table({ poker }: { poker: Poker }) {
           {s.pending && (
             <div className="table-banner">{pendingTitle(s.pending.kind, s.pending.count, true)}</div>
           )}
-          {s.phase === 'choosing' && s.dealerId !== s.you && (
+          {s.phase === 'choosing' && s.chooserId !== s.you && (
             <div className="table-banner">{dealer?.name ?? 'Dealer'} is picking the game…</div>
           )}
           {showWinners && (
@@ -275,7 +305,7 @@ export function Table({ poker }: { poker: Poker }) {
         : <Actions s={s} me={me} send={send} />}
 
       {s.phase === 'lobby' && <WaitingRoom s={s} send={send} toast={toastFn} />}
-      {s.phase === 'choosing' && s.dealerId === s.you && <GamePicker s={s} send={send} />}
+      {s.phase === 'choosing' && s.chooserId === s.you && <GamePicker s={s} send={send} />}
       {shownToast && <div className="toast">{shownToast}</div>}
     </div>
   );
@@ -297,7 +327,7 @@ function MyCards({ s, me, picked, onTap, delay }: {
   const choosing = !!p && !s.myReady && !me.folded;
   const up = peek || choosing || !!me.handName;
   const n = me.cards.length;
-  const width = Math.min(80, Math.floor((Math.min(window.innerWidth, 480) - 48) / (n * 0.92 + 0.2)));
+  const width = Math.min(window.innerWidth > 700 ? 100 : 80, Math.floor((Math.min(window.innerWidth, 560) - 48) / (n * 0.92 + 0.2)));
   const arranging = choosing && p!.kind === 'arrange';
   const grouped = s.pairs && !arranging && n > 2; // show locked pairs with a gap between them
   const pairOf = (i: number): number | null => {
@@ -351,7 +381,7 @@ function SplitCards({ s, me, send, delay }: { s: TableView; me: SeatView; send: 
   const n = cards.length;
   const canSwap = s.phase === 'playing' && !me.folded;
   const up = peek || swapping || !!me.handName;
-  const width = Math.min(76, Math.floor((Math.min(window.innerWidth, 480) - 64) / (n * 0.95 + 0.2)));
+  const width = Math.min(window.innerWidth > 700 ? 92 : 76, Math.floor((Math.min(window.innerWidth, 560) - 64) / (n * 0.95 + 0.2)));
   const groupOf = (i: number) => (i < split.sizes[0] ? 0 : 1);
   useEffect(() => { if (!canSwap) { setSwapping(false); setSel(null); } }, [canSwap]);
 
@@ -580,7 +610,7 @@ function GamePicker({ s, send }: { s: TableView; send: (m: ClientMsg) => void })
 
   return (
     <div className="sheet">
-      <div className="sheet-title">You're dealing, pick the game</div>
+      <div className="sheet-title">{s.practice ? 'Pick the next game' : "You're dealing, pick the game"}</div>
       <div className="games">
         {GAMES.map(g => (
           <button key={g.id} className={`game ${g.ready ? '' : 'soon'}`} disabled={!g.ready}
@@ -590,7 +620,7 @@ function GamePicker({ s, send }: { s: TableView; send: (m: ClientMsg) => void })
           </button>
         ))}
       </div>
-      {s.turnMsLeft != null && <p className="muted center">Hold'em starts automatically if you don't pick.</p>}
+      {!s.practice && s.turnMsLeft != null && <p className="muted center">Hold'em starts automatically if you don't pick.</p>}
     </div>
   );
 }

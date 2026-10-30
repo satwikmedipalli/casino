@@ -44,6 +44,7 @@ export interface SeatView {
   name: string;
   chips: number;
   connected: boolean;
+  bot: boolean;
   inHand: boolean;
   folded: boolean;
   allIn: boolean;
@@ -63,6 +64,8 @@ export interface TableView {
   handNo: number;
   street: Street | null;
   dealerId: string | null;
+  chooserId: string | null; // who picks the game (the dealer, or you in practice)
+  practice: boolean;
   sbId: string | null;
   bbId: string | null;
   seats: SeatView[];
@@ -90,7 +93,7 @@ export interface TableView {
 }
 
 export type ClientMsg =
-  | { t: 'create'; name: string; startingChips: number; bb: number }
+  | { t: 'create'; name: string; startingChips: number; bb: number; bots?: number }
   | { t: 'join'; code: string; name: string; token?: string }
   | { t: 'start' }
   | { t: 'choose'; game: GameId; target?: number; farthest?: boolean }
