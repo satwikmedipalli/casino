@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: poker-night
+    runtime: node
+    plan: free
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /
+    domains:
+      - poker.satwikmedipalli.dev
