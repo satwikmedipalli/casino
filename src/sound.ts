@@ -56,4 +56,6 @@ export const sfx = {
   flip(count = 1) { for (let i = 0; i < count; i++) this.card(i * 0.14); },
   turn() { tone(0, 660, 0.18, 0.15); tone(0.12, 990, 0.25, 0.12); },
   win() { this.chip(10); },
+  emote() { tone(0, 520, 0.12, 0.12); tone(0.08, 780, 0.16, 0.1); },
+  message() { tone(0, 880, 0.1, 0.06); },
 };

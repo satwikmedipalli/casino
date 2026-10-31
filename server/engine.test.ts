@@ -323,3 +323,29 @@ test('practice: bots play 200 hands of every game without losing or creating chi
   }
   room.dispose();
 });
+
+test('table chat: trims, caps length and history, rate limits, checks emotes', t => {
+  const room = new Room('CHAT', 1000, 20, () => {});
+  t.after(() => room.dispose());
+  const a = room.addPlayer('Satwik');
+  const now = Date.now();
+  let clock = now;
+  t.mock.method(Date, 'now', () => clock);
+  room.sendChat(a.id, '  hello   there  ');
+  assert.deepEqual(room.chat.at(-1), { id: 1, from: a.id, name: 'Satwik', text: 'hello there' });
+  assert.throws(() => room.sendChat(a.id, 'too fast'), /Slow down/);
+  clock += 600;
+  room.sendChat(a.id, 'x'.repeat(300));
+  assert.equal(room.chat.at(-1)!.text!.length, 200);
+  clock += 600;
+  assert.throws(() => room.sendChat(a.id, undefined, 'bogus'), /Unknown emote/);
+  room.sendChat(a.id, undefined, 'clown');
+  assert.equal(room.chat.at(-1)!.emote, 'clown');
+  clock += 600;
+  room.sendChat(a.id, '   ');
+  assert.equal(room.chat.length, 3, 'blank messages are dropped');
+  for (let i = 0; i < 60; i++) { clock += 600; room.sendChat(a.id, `m${i}`); }
+  assert.equal(room.chat.length, 50);
+  assert.equal(room.chat.at(-1)!.text, 'm59');
+  assert.equal(room.view(a.id).chat.length, 50);
+});

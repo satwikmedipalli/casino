@@ -90,7 +90,28 @@ export interface TableView {
   startingChips: number;
   winners: { id: string; amount: number; handName?: string }[];
   log: string[];
+  chat: ChatMsg[];
 }
+
+export interface ChatMsg { id: number; from: string; name: string; text?: string; emote?: string }
+
+export type EmoteAnim = 'pop' | 'shake' | 'spin' | 'flop' | 'rain';
+export const EMOTES: { id: string; e: string; label: string; anim: EmoteAnim }[] = [
+  { id: 'clown', e: '🤡', label: 'Clown', anim: 'pop' },
+  { id: 'fish', e: '🐟', label: 'Fish', anim: 'flop' },
+  { id: 'salty', e: '🧂', label: 'Salty', anim: 'shake' },
+  { id: 'money', e: '💸', label: 'Make it rain', anim: 'rain' },
+  { id: 'cry', e: '😭', label: 'Crying', anim: 'shake' },
+  { id: 'think', e: '🤔', label: 'Hmm…', anim: 'flop' },
+  { id: 'sleep', e: '😴', label: 'Hurry up', anim: 'pop' },
+  { id: 'skull', e: '💀', label: "I'm dead", anim: 'spin' },
+  { id: 'pray', e: '🙏', label: 'Please river', anim: 'pop' },
+  { id: 'chicken', e: '🐔', label: 'Chicken', anim: 'flop' },
+  { id: 'nuts', e: '🥜', label: 'The nuts', anim: 'spin' },
+  { id: 'fire', e: '🔥', label: 'On fire', anim: 'rain' },
+];
+export const QUICK_CHAT = ['Nice hand', 'gg', 'Ship it', 'Lucky river', 'All in?', 'Hurry up', 'Fold already', 'Brb'];
+export const CHAT_MAX = 200;
 
 export type ClientMsg =
   | { t: 'create'; name: string; startingChips: number; bb: number; bots?: number }
@@ -101,6 +122,7 @@ export type ClientMsg =
   | { t: 'discard'; cards: Card[] }
   | { t: 'arrange'; cards: Card[] }
   | { t: 'rebuy' }
+  | { t: 'chat'; text?: string; emote?: string }
   | { t: 'leave' };
 
 export type ServerMsg =

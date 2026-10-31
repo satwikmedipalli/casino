@@ -84,6 +84,7 @@ function handle(ws: WebSocket, msg: ClientMsg) {
     case 'discard': room.discard(s.playerId, msg.cards); break;
     case 'arrange': room.arrange(s.playerId, msg.cards); break;
     case 'rebuy': room.rebuy(s.playerId); break;
+    case 'chat': room.sendChat(s.playerId, msg.text, msg.emote); break;
     case 'leave':
       room.leave(s.playerId);
       sockets.delete(ws);

@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { GAMES, SPLITS, fmt, isAK47Wild } from '../shared/types';
 import type { Card, ClientMsg, SeatView, TableView } from '../shared/types';
 import { CardView, ChipStack, FlipCard } from './Card';
+import { ChatButton, ChatPanel, SeatBubble, useChat } from './Chat';
 import type { Poker } from './net';
 import { sfx } from './sound';
 
@@ -43,6 +44,8 @@ export function Table({ poker }: { poker: Poker }) {
   const send = poker.send;
   const [toast, setToast] = useState<string | null>(null);
   const shownToast = poker.error ?? toast;
+  const [chatOpen, setChatOpen] = useState(false);
+  const { fresh, unread } = useChat(s.chat, s.you, chatOpen);
   useEffect(() => {
     if (!shownToast) return;
     const t = setTimeout(() => { poker.clearError(); setToast(null); }, 2500);
@@ -177,11 +180,11 @@ export function Table({ poker }: { poker: Poker }) {
   const toastFn = (m: string) => setToast(m);
 
   return (
-    <div className="screen">
+    <div className={`screen ${chatOpen && size.wide ? 'chat-side' : ''}`}>
       <header className="topbar">
         {s.practice
           ? <span className="pill gold">Practice</span>
-          : <button className="pill gold" onClick={() => shareTable(s.code, toastFn)}>Invite · {s.code}</button>}
+          : <button className="pill gold" onClick={() => shareTable(s.code, toastFn)}><span className="invite-word">Invite · </span>{s.code}</button>}
         <div className="title">
           <div>{gameName(s.game)}</div>
           <small>
@@ -189,7 +192,10 @@ export function Table({ poker }: { poker: Poker }) {
             Blinds {fmt(s.blinds.sb)}/{fmt(s.blinds.bb)}
           </small>
         </div>
-        <button className="pill" onClick={() => { if (confirm('Leave the table?')) send({ t: 'leave' }); }}>Leave</button>
+        <div className="top-right">
+          <ChatButton unread={unread} onClick={() => setChatOpen(o => !o)} />
+          <button className="pill" onClick={() => { if (confirm('Leave the table?')) send({ t: 'leave' }); }}>Leave</button>
+        </div>
       </header>
 
       {!poker.connected && <div className="reconnecting">Reconnecting…</div>}
@@ -268,6 +274,7 @@ export function Table({ poker }: { poker: Poker }) {
                 {seat.handName && !isMe && !s.split && <div className="hand-name">{seat.handName}</div>}
                 {!seat.connected && <div className="away-tag">away</div>}
                 {seat.waiting && <div className="away-tag">choosing…</div>}
+                {fresh[seat.id] && <SeatBubble key={fresh[seat.id].id} m={fresh[seat.id]} below={g.seat.y < size.h * 0.3} />}
               </div>
             );
           })}
@@ -306,6 +313,7 @@ export function Table({ poker }: { poker: Poker }) {
 
       {s.phase === 'lobby' && <WaitingRoom s={s} send={send} toast={toastFn} />}
       {s.phase === 'choosing' && s.chooserId === s.you && <GamePicker s={s} send={send} />}
+      {chatOpen && <ChatPanel s={s} send={send} wide={size.wide} onClose={() => setChatOpen(false)} />}
       {shownToast && <div className="toast">{shownToast}</div>}
     </div>
   );

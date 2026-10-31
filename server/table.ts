@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { GAMES, SPLITS, fmt, isAK47Wild } from '../shared/types';
-import type { Action, Card, GameId, Pending, Phase, SeatView, SplitKind, Street, TableView, Target } from '../shared/types';
+import { CHAT_MAX, EMOTES, GAMES, SPLITS, fmt, isAK47Wild } from '../shared/types';
+import type { Action, Card, ChatMsg, GameId, Pending, Phase, SeatView, SplitKind, Street, TableView, Target } from '../shared/types';
 import { newDeck, rankValue } from './cards';
 import { bestHand, bestUsing, bestWild, combinations, triple9Number, worstHand } from './evaluate';
 import type { HandScore } from './evaluate';
@@ -13,6 +13,9 @@ const SHOWDOWN_MS = 8_000;
 const FOLD_WIN_MS = 3_500;
 const MAX_PLAYERS = 9;
 const PENDING_MS = 30_000;
+const CHAT_KEEP = 50;
+const CHAT_GAP_MS = 500;
+const REACT_MS = 1_200;
 
 /** How each game differs from Hold'em. Drops happen as each street opens, before its betting. */
 interface Rules {
@@ -98,6 +101,10 @@ export class Room {
   hand: Hand | null = null;
   handNo = 0;
   log: string[] = [];
+  chat: ChatMsg[] = [];
+  private chatSeq = 0;
+  private lastChat = new Map<string, number>();
+  private reactTimer: NodeJS.Timeout | null = null;
   private timer: NodeJS.Timeout | null = null;
   private turnDeadline: number | null = null;
   private turnTotal = TURN_MS;
@@ -119,8 +126,10 @@ export class Room {
   dispose() {
     if (this.timer) clearTimeout(this.timer);
     if (this.botTimer) clearTimeout(this.botTimer);
+    if (this.reactTimer) clearTimeout(this.reactTimer);
     this.timer = null;
     this.botTimer = null;
+    this.reactTimer = null;
   }
 
   addBots(count: number) {
@@ -192,6 +201,54 @@ export class Room {
     if (p.chips > 0) throw new GameError('You still have chips');
     p.chips = this.startingChips;
     this.say(`${p.name} rebought for ${fmt(this.startingChips)}`);
+  }
+
+  // ---------- chat ----------
+
+  sendChat(id: string, text?: string, emote?: string) {
+    const p = this.player(id);
+    if (!p) return;
+    const now = Date.now();
+    if (now - (this.lastChat.get(id) ?? 0) < CHAT_GAP_MS) throw new GameError('Slow down');
+    if (emote !== undefined) {
+      if (!EMOTES.some(e => e.id === emote)) throw new GameError('Unknown emote');
+      this.postChat(p, { emote });
+    } else {
+      const clean = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, CHAT_MAX);
+      if (!clean) return;
+      this.postChat(p, { text: clean });
+    }
+    this.lastChat.set(id, now);
+  }
+
+  private postChat(p: Player, body: { text?: string; emote?: string }) {
+    this.chat.push({ id: ++this.chatSeq, from: p.id, name: p.name, ...body });
+    if (this.chat.length > CHAT_KEEP) this.chat.shift();
+  }
+
+  /** Practice bots sometimes gloat or sulk after a decent pot. */
+  private botReact(byFold: boolean) {
+    if (!this.practice || Math.random() < 0.5) return;
+    const h = this.hand!;
+    const big = this.bb * 4;
+    const options: [string, string[]][] = [];
+    for (const w of h.winners) {
+      if (this.player(w.id)?.bot && w.amount >= big) options.push([w.id, byFold ? ['chicken', 'clown'] : ['fire', 'money', 'nuts']]);
+    }
+    if (!byFold) for (const x of h.hp.values()) {
+      if (!x.won && x.total >= big && this.player(x.id)?.bot) options.push([x.id, ['salty', 'cry', 'skull']]);
+    }
+    if (!options.length) return;
+    const [id, emotes] = options[Math.floor(Math.random() * options.length)];
+    if (this.reactTimer) clearTimeout(this.reactTimer);
+    this.reactTimer = setTimeout(() => {
+      this.reactTimer = null;
+      const p = this.player(id);
+      if (!p) return;
+      this.postChat(p, { emote: emotes[Math.floor(Math.random() * emotes.length)] });
+      this.onChange();
+    }, REACT_MS);
+    this.reactTimer.unref?.();
   }
 
   // ---------- flow ----------
@@ -729,6 +786,7 @@ export class Room {
       h.winners.push({ id, amount, handName: reason });
       this.say(`${this.player(id)!.name} wins ${fmt(amount)} with ${reason}`);
     }
+    this.botReact(false);
     this.schedule(SHOWDOWN_MS, () => this.nextHand());
   }
 
@@ -744,6 +802,7 @@ export class Room {
     this.turnDeadline = null;
     this.phase = 'showdown';
     this.say(`${this.player(w.id)!.name} wins ${fmt(total)}`);
+    this.botReact(true);
     this.schedule(FOLD_WIN_MS, () => this.nextHand());
   }
 
@@ -818,6 +877,7 @@ export class Room {
       startingChips: this.startingChips,
       winners: h?.winners ?? [],
       log: this.log.slice(-12),
+      chat: this.chat,
     };
   }
 }
