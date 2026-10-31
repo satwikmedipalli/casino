@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { bestHand, bestUsing, bestWild, eval5, triple9Number, worstHand } from './evaluate';
 import { isAK47Wild } from '../shared/types';
 import { Room } from './table';
+import { bankDraws, botMove, isBlackjack, settleHand, total } from './blackjack';
 
 const score = (s: string) => eval5(s.split(' ')).score;
 
@@ -348,4 +349,137 @@ test('table chat: trims, caps length and history, rate limits, checks emotes', t
   assert.equal(room.chat.length, 50);
   assert.equal(room.chat.at(-1)!.text, 'm59');
   assert.equal(room.view(a.id).chat.length, 50);
+});
+
+// ---------- Blackjack ----------
+
+test('blackjack totals, soft hands and payouts', () => {
+  assert.deepEqual(total(['As', 'Kd']), { total: 21, soft: true });
+  assert.deepEqual(total(['As', 'Ad', '9c']), { total: 21, soft: true });
+  assert.deepEqual(total(['As', 'Kd', '5c']), { total: 16, soft: false });
+  assert.ok(isBlackjack(['Ah', 'Qs']) && !isBlackjack(['7h', '7s', '7c']));
+  assert.equal(bankDraws(['As', '6d']), false, 'bank stands on soft 17');
+  assert.equal(bankDraws(['Ts', '6d']), true);
+  assert.deepEqual(settleHand(['Ah', 'Kd'], 20, true, ['Ts', '9d']), { result: 'blackjack', back: 50 });
+  assert.deepEqual(settleHand(['Ah', 'Kd'], 15, true, ['Ts', '9d']), { result: 'blackjack', back: 37 }, '3:2 rounds down');
+  assert.deepEqual(settleHand(['Ah', 'Kd'], 20, true, ['As', 'Jd']), { result: 'push', back: 20 });
+  assert.deepEqual(settleHand(['7h', '7d', '7c'], 20, false, ['As', 'Jd']), { result: 'lose', back: 0 }, '21 loses to a blackjack');
+  assert.deepEqual(settleHand(['Th', '6d', '9c'], 20, false, ['Ts', '6c', 'Kd']), { result: 'bust', back: 0 }, 'you bust first');
+  assert.deepEqual(settleHand(['Th', '6d'], 20, false, ['Ts', '6c', 'Kd']), { result: 'win', back: 40 });
+  assert.deepEqual(settleHand(['Th', '8d'], 20, false, ['Ts', '8c']), { result: 'push', back: 20 });
+});
+
+/** A 3-seat table where `bank` has just picked Blackjack; `deal` is the order cards come off the shoe. */
+function bjTable(deal: string[], limits = { min: 20, max: 200 }, bankChips = 1000) {
+  const room = new Room('BJ', 1000, 20, () => {});
+  const bank = room.addPlayer('Bank');
+  const b = room.addPlayer('B');
+  const c = room.addPlayer('C');
+  bank.chips = bankChips;
+  room.start(bank.id);
+  room.chooserId = bank.id;
+  room.choose(bank.id, 'blackjack', undefined, undefined, limits);
+  room.bj!.deck = [...deal].reverse();
+  return { room, bank, b, c, r: room as any };
+}
+
+test('blackjack: split, double after split, bank stands on 17', () => {
+  // B 8s C Th bank Tc, B 8d C 9h bank 7c, then B's split hands get 3c and Td, the double gets Kh.
+  const { room, bank, b, c } = bjTable(['8s', 'Th', 'Tc', '8d', '9h', '7c', '3c', 'Td', 'Kh']);
+  assert.throws(() => room.bjBet(b.id, 5), /Bet from/);
+  room.bjBet(b.id, 20);
+  room.bjBet(c.id, 20);
+  assert.equal(room.bj!.step, 'play');
+  assert.deepEqual(room.view(c.id).bj!.dealer, ['Tc', null], 'hole card stays hidden');
+  assert.throws(() => room.bjAct(c.id, 'stand'), /not your turn/);
+  room.bjAct(b.id, 'split');
+  assert.equal(room.view(b.id).bj!.canDouble, true);
+  room.bjAct(b.id, 'double'); // 8 + 3 + K = 21
+  room.bjAct(b.id, 'stand');  // 8 + T = 18
+  room.bjAct(c.id, 'stand');  // 19
+  assert.equal(room.bj!.step, 'bank');
+  (room as any).bjBankStep();
+  assert.equal(room.bj!.step, 'done');
+  assert.deepEqual(room.bj!.players.map(y => y.net), [60, 20]);
+  assert.equal(b.chips, 1060);
+  assert.equal(c.chips, 1020);
+  assert.equal(bank.chips, 920);
+  room.dispose();
+});
+
+test('blackjack: insurance pays 2:1 when the bank has blackjack, naturals push', () => {
+  // B 9s C Th bank As, B 9d C Ah bank Kc.
+  const { room, bank, b, c } = bjTable(['9s', 'Th', 'As', '9d', 'Ah', 'Kc']);
+  room.bjBet(b.id, 100);
+  room.bjBet(c.id, 40);
+  assert.equal(room.bj!.step, 'insurance');
+  assert.equal(room.view(b.id).bj!.insuranceCost, 50);
+  room.bjInsure(b.id, true);
+  room.bjInsure(c.id, false);
+  assert.equal(room.bj!.step, 'done', 'bank blackjack ends the round');
+  assert.deepEqual(room.bj!.players.map(y => [y.net, y.hands[0].result]), [[0, 'lose'], [0, 'push']]);
+  assert.equal(bank.chips, 1000);
+  assert.equal(b.chips + c.chips, 2000);
+  room.dispose();
+});
+
+test('blackjack: a bank that runs dry pays winners from its left first', () => {
+  // B Ts C Tc bank Td, B 8s C 9c bank 6d, bank draws Kh and busts.
+  const { room, bank, b, c } = bjTable(['Ts', 'Tc', 'Td', '8s', '9c', '6d', 'Kh'], { min: 100, max: 100 }, 100);
+  assert.throws(() => bjTable([], { min: 20, max: 500 }, 100), /at least the max bet/);
+  room.bjBet(b.id, 100);
+  room.bjBet(c.id, 100);
+  room.bjAct(b.id, 'stand');
+  room.bjAct(c.id, 'stand');
+  (room as any).bjBankStep();
+  (room as any).bjBankStep();
+  assert.equal(room.bj!.step, 'done');
+  assert.deepEqual([bank.chips, b.chips, c.chips], [0, 1100, 1000]);
+  room.dispose();
+});
+
+test('games that need too many cards are refused at a full table', () => {
+  const room = new Room('FULL', 1000, 20, () => {});
+  const ps = Array.from({ length: 9 }, (_, i) => room.addPlayer(`P${i}`));
+  room.start(ps[0].id);
+  const by = room.chooserId!;
+  assert.throws(() => room.choose(by, 'omaha6'), /at most 7 players/);
+  assert.throws(() => room.choose(by, 'triple9'), /at most 8 players/);
+  room.choose(by, 'high_low');
+  assert.equal(room.phase, 'playing');
+  room.dispose();
+});
+
+test('practice blackjack: 200 rounds with bots never create or lose chips', () => {
+  const room = new Room('BJP', 1000, 20, () => {});
+  const me = room.addPlayer('Me');
+  room.practice = true;
+  room.addBots(5);
+  room.start(me.id);
+  const r = room as any;
+  for (let round = 0; round < 200; round++) {
+    if (me.chips < 200) me.chips = 1000;
+    const before = room.players.reduce((t, p) => t + p.chips, 0);
+    room.choose(me.id, 'blackjack', undefined, undefined, { min: 20, max: 200 });
+    const bj = room.bj!;
+    for (const y of bj.players) {
+      const p = room.player(y.id)!;
+      room.bjBet(y.id, round % 7 === 0 && y === bj.players[0] ? 0 : Math.min(p.chips, 20 + (round % 5) * 40));
+    }
+    for (const y of bj.players) if ((bj.step as string) === 'insurance' && y.insurance === null) room.bjInsure(y.id, round % 2 === 0);
+    for (let step = 0; step < 100 && bj.step === 'play'; step++) {
+      const a = bj.active!;
+      const y = bj.players[a.i];
+      const hand = y.hands[a.hand];
+      const can = r.bjCan(y, hand);
+      room.bjAct(y.id, botMove(hand.cards, bj.dealer[0], can.double, can.split));
+    }
+    for (let step = 0; step < 20 && bj.step === 'bank'; step++) r.bjBankStep();
+    assert.equal(bj.step, 'done', `round ${round} did not finish`);
+    assert.equal(room.players.reduce((t, p) => t + p.chips, 0), before, `round ${round} changed the chip total`);
+    const nets = bj.players.reduce((t, y) => t + (y.net ?? 0), 0) + bj.bankNet!;
+    assert.equal(nets, 0, `round ${round}: winnings and losses should cancel out`);
+    r.nextHand();
+  }
+  room.dispose();
 });

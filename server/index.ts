@@ -79,11 +79,14 @@ function handle(ws: WebSocket, msg: ClientMsg) {
   if (!s || !room) return send(ws, { t: 'error', message: 'Not at a table', fatal: true });
   switch (msg.t) {
     case 'start': room.start(s.playerId); break;
-    case 'choose': room.choose(s.playerId, msg.game, msg.target, msg.farthest); break;
+    case 'choose': room.choose(s.playerId, msg.game, msg.target, msg.farthest, msg.bj); break;
     case 'act': room.act(s.playerId, msg.action, msg.amount); break;
     case 'discard': room.discard(s.playerId, msg.cards); break;
     case 'arrange': room.arrange(s.playerId, msg.cards); break;
     case 'rebuy': room.rebuy(s.playerId); break;
+    case 'bj_bet': room.bjBet(s.playerId, msg.amount); break;
+    case 'bj_insure': room.bjInsure(s.playerId, !!msg.take); break;
+    case 'bj_act': room.bjAct(s.playerId, msg.action); break;
     case 'chat': room.sendChat(s.playerId, msg.text, msg.emote); break;
     case 'leave':
       room.leave(s.playerId);

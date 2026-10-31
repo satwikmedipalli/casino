@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { CHAT_MAX, EMOTES, GAMES, SPLITS, fmt, isAK47Wild } from '../shared/types';
-import type { Action, Card, ChatMsg, GameId, Pending, Phase, SeatView, SplitKind, Street, TableView, Target } from '../shared/types';
+import type {
+  Action, BJAction, BJResult, BJStep, BJView, Card, ChatMsg, GameId, Pending, Phase, PokerGameId, SeatView, SplitKind, Street,
+  TableView, Target,
+} from '../shared/types';
+import { bankDraws, botMove, cardValue, isBlackjack, settleHand, shoe, total } from './blackjack';
 import { newDeck, rankValue } from './cards';
 import { bestHand, bestUsing, bestWild, combinations, triple9Number, worstHand } from './evaluate';
 import type { HandScore } from './evaluate';
@@ -16,6 +20,9 @@ const PENDING_MS = 30_000;
 const CHAT_KEEP = 50;
 const CHAT_GAP_MS = 500;
 const REACT_MS = 1_200;
+const BJ_STEP_MS = 30_000; // betting and insurance, everyone at once
+const BJ_DRAW_MS = 900;    // the bank turns its cards over one at a time
+const BJ_DONE_MS = 7_000;
 
 /** How each game differs from Hold'em. Drops happen as each street opens, before its betting. */
 interface Rules {
@@ -26,7 +33,7 @@ interface Rules {
   wild?: boolean;
   split?: SplitKind;
 }
-const RULES: Record<GameId, Rules> = {
+const RULES: Record<PokerGameId, Rules> = {
   holdem: { hole: 2 },
   irish: { hole: 3, drops: { preflop: 1 } },
   three_card: { hole: 3, use: 2 },
@@ -74,7 +81,7 @@ interface HandPlayer {
 }
 
 interface Hand {
-  game: GameId;
+  game: PokerGameId;
   deck: Card[];
   board: Card[];
   board2: Card[];
@@ -92,6 +99,28 @@ interface Hand {
   winners: { id: string; amount: number; handName?: string }[];
 }
 
+interface BJHand { cards: Card[]; bet: number; doubled: boolean; done: boolean; natural: boolean; splitAces: boolean; result?: BJResult }
+interface BJPlayer {
+  id: string;
+  bet: number | null; // null = hasn't bet yet; 0 = sitting out
+  hands: BJHand[];
+  insurance: number | null;
+  staked: number; // everything this player has put in this round
+  net?: number;
+}
+interface BJRound {
+  min: number;
+  max: number;
+  bankerId: string;
+  step: BJStep;
+  deck: Card[];
+  dealer: Card[];
+  holeShown: boolean;
+  players: BJPlayer[]; // seat order from the bank's left
+  active: { i: number; hand: number } | null;
+  bankNet?: number;
+}
+
 export class Room {
   players: Player[] = [];
   hostId = '';
@@ -99,6 +128,7 @@ export class Room {
   dealerId: string | null = null;
   private dealerSeat = -1;
   hand: Hand | null = null;
+  bj: BJRound | null = null;
   handNo = 0;
   log: string[] = [];
   chat: ChatMsg[] = [];
@@ -166,11 +196,28 @@ export class Room {
     p.connected = connected;
     // Don't make everyone wait 40s on someone whose phone went to sleep.
     if (!connected && this.hand?.toAct === id) this.setTurn(id);
+    if (!connected && this.bj?.active && this.bj.players[this.bj.active.i].id === id) this.bjTurn();
   }
 
   leave(id: string) {
     const p = this.player(id);
     if (!p) return;
+    const bj = this.bj;
+    if (bj && (this.phase === 'playing' || this.phase === 'showdown') && (bj.bankerId === id || bj.players.some(y => y.id === id))) {
+      // Stay seated until the round settles (the bank's chips still pay out); stand on anything left.
+      p.leaving = true;
+      const y = bj.players.find(z => z.id === id);
+      if (y && bj.step === 'bet' && y.bet === null) this.bjBet(id, 0);
+      else if (y && bj.step === 'insurance' && y.insurance === null) this.bjInsure(id, false);
+      else if (y && bj.step === 'play') {
+        const mine = bj.active && bj.players[bj.active.i] === y;
+        for (const hand of y.hands) hand.done = true;
+        if (mine) this.bjNext();
+      }
+      this.say(`${p.name} left`);
+      if (this.hostId === id) this.hostId = this.players.find(q => !q.leaving)?.id ?? '';
+      return;
+    }
     const h = this.hand;
     const x = h?.hp.get(id);
     if (h && x && (this.phase === 'playing' || this.phase === 'showdown')) {
@@ -198,6 +245,7 @@ export class Room {
     if (!p) return;
     const x = this.hand?.hp.get(id);
     if (this.phase === 'playing' && x && !x.folded) throw new GameError('Finish this hand first');
+    if (this.phase === 'playing' && this.bj?.players.some(y => y.id === id && y.staked > 0)) throw new GameError('Finish this hand first');
     if (p.chips > 0) throw new GameError('You still have chips');
     p.chips = this.startingChips;
     this.say(`${p.name} rebought for ${fmt(this.startingChips)}`);
@@ -238,6 +286,10 @@ export class Room {
     if (!byFold) for (const x of h.hp.values()) {
       if (!x.won && x.total >= big && this.player(x.id)?.bot) options.push([x.id, ['salty', 'cry', 'skull']]);
     }
+    this.queueReact(options);
+  }
+
+  private queueReact(options: [string, string[]][]) {
     if (!options.length) return;
     const [id, emotes] = options[Math.floor(Math.random() * options.length)];
     if (this.reactTimer) clearTimeout(this.reactTimer);
@@ -263,11 +315,14 @@ export class Room {
     this.beginChoosing(first);
   }
 
-  choose(by: string, game: GameId, target?: number, farthest?: boolean) {
+  choose(by: string, game: GameId, target?: number, farthest?: boolean, limits?: { min: number; max: number }) {
     if (this.phase !== 'choosing') throw new GameError('Not choosing right now');
     if (by !== this.chooserId) throw new GameError('Only the dealer picks the game');
     const info = GAMES.find(g => g.id === game);
     if (!info?.ready) throw new GameError('That game is coming soon');
+    const seated = this.players.filter(p => p.chips > 0 && !p.leaving).length;
+    if (seated > info.maxPlayers) throw new GameError(`${info.name} fits at most ${info.maxPlayers} players`);
+    if (game === 'blackjack') return this.startBlackjack(by, limits);
     let t: Target | null = null;
     if (game === 'triple9') t = { value: 999, farthest: false };
     if (game === 'triple9_custom') {
@@ -280,6 +335,7 @@ export class Room {
 
   private beginChoosing(dealer: Player) {
     this.hand = null;
+    this.bj = null;
     this.dealerId = dealer.id;
     this.dealerSeat = dealer.seat;
     this.phase = 'choosing';
@@ -295,6 +351,7 @@ export class Room {
     this.players = this.players.filter(p => !p.leaving);
     if (!this.player(this.hostId)) this.hostId = this.players[0]?.id ?? '';
     this.hand = null;
+    this.bj = null;
     for (const b of this.players) {
       if (b.bot && b.chips === 0) { b.chips = this.startingChips; this.say(`${b.name} rebought`); }
     }
@@ -311,7 +368,7 @@ export class Room {
     this.beginChoosing(next);
   }
 
-  private startHand(game: GameId, target: Target | null = null) {
+  private startHand(game: PokerGameId, target: Target | null = null) {
     const parts = this.players.filter(p => p.chips > 0 && !p.leaving);
     if (parts.length < 2) { this.nextHand(); return; }
     if (!parts.some(p => p.id === this.dealerId)) this.dealerId = parts[0].id;
@@ -447,6 +504,353 @@ export class Room {
     }
     x.acted = true;
     this.proceed(id);
+  }
+
+  // ---------- blackjack: the player who picked it is the bank ----------
+
+  private startBlackjack(bankerId: string, limits?: { min: number; max: number }) {
+    const banker = this.player(bankerId)!;
+    const min = Math.floor(Number(limits?.min));
+    const max = Math.floor(Number(limits?.max));
+    if (!Number.isFinite(min) || !Number.isFinite(max) || min < 1 || max < min) {
+      throw new GameError('Set a min bet, and a max bet at least as big');
+    }
+    if (max > banker.chips) throw new GameError(`As the bank you need at least the max bet (${fmt(max)})`);
+    const left = [...this.players.filter(p => p.seat > banker.seat), ...this.players.filter(p => p.seat < banker.seat)];
+    const order = left.filter(p => !p.leaving && p.chips >= min);
+    if (!order.length) throw new GameError('Nobody else has enough chips for the min bet');
+
+    this.hand = null;
+    this.handNo++;
+    this.phase = 'playing';
+    const bj: BJRound = {
+      min, max, bankerId, step: 'bet', deck: shoe(), dealer: [], holeShown: false, active: null,
+      players: order.map(p => ({ id: p.id, bet: null, hands: [], insurance: null, staked: 0 })),
+    };
+    this.bj = bj;
+    this.say(`Hand #${this.handNo}: Blackjack, ${banker.name} is the bank (bets ${fmt(min)} to ${fmt(max)})`);
+    this.timed(BJ_STEP_MS, () => {
+      if (this.bj !== bj || bj.step !== 'bet') return;
+      for (const y of bj.players) if (y.bet === null) y.bet = 0;
+      this.bjDeal();
+    });
+    this.bjBots(() => {
+      if (this.bj !== bj || bj.step !== 'bet') return;
+      for (const y of bj.players) {
+        const p = this.player(y.id)!;
+        if (!p.bot || y.bet !== null) continue;
+        const f = [0, 0, 0.25, 0.5, 1][Math.floor(Math.random() * 5)];
+        const top = Math.min(bj.max, p.chips);
+        const want = bj.min + Math.round(((top - bj.min) * f) / this.sb) * this.sb;
+        this.bjBet(y.id, Math.max(bj.min, Math.min(top, want)));
+      }
+    });
+  }
+
+  private bjSeat(id: string) {
+    const bj = this.bj;
+    const y = bj?.players.find(z => z.id === id);
+    if (!bj || this.phase !== 'playing') throw new GameError('No blackjack round right now');
+    if (!y) throw new GameError(bj.bankerId === id ? "You're the bank this round" : "You're not in this round");
+    return { bj, y, p: this.player(id)! };
+  }
+
+  bjBet(id: string, amount: number) {
+    const { bj, y, p } = this.bjSeat(id);
+    if (bj.step !== 'bet') throw new GameError('Betting is closed');
+    if (y.bet !== null) throw new GameError('You already bet');
+    const a = Math.floor(Number(amount));
+    if (a === 0) {
+      y.bet = 0;
+      this.say(`${p.name} sits this one out`);
+    } else {
+      if (!Number.isFinite(a) || a < bj.min || a > bj.max) throw new GameError(`Bet from ${fmt(bj.min)} to ${fmt(bj.max)}`);
+      if (a > p.chips) throw new GameError('Not enough chips');
+      p.chips -= a;
+      y.bet = a;
+      y.staked = a;
+      y.hands = [{ cards: [], bet: a, doubled: false, done: false, natural: false, splitAces: false }];
+      this.say(`${p.name} bets ${fmt(a)}`);
+    }
+    if (bj.players.every(z => z.bet !== null)) this.bjDeal();
+  }
+
+  private bjDeal() {
+    const bj = this.bj!;
+    const playing = bj.players.filter(y => y.bet);
+    if (!playing.length) {
+      this.say('Nobody bet');
+      bj.step = 'done';
+      this.phase = 'showdown';
+      this.turnDeadline = null;
+      this.schedule(2_500, () => this.nextHand());
+      return;
+    }
+    for (let round = 0; round < 2; round++) {
+      for (const y of playing) y.hands[0].cards.push(bj.deck.pop()!);
+      bj.dealer.push(bj.deck.pop()!);
+    }
+    for (const y of playing) {
+      const hand = y.hands[0];
+      hand.natural = isBlackjack(hand.cards);
+      hand.done = hand.natural;
+    }
+    if (bj.dealer[0][0] !== 'A') return this.bjAfterInsurance();
+
+    bj.step = 'insurance';
+    for (const y of bj.players) {
+      const cost = Math.floor((y.bet ?? 0) / 2);
+      y.insurance = y.bet && cost > 0 && this.player(y.id)!.chips >= cost ? null : 0;
+    }
+    if (bj.players.every(y => y.insurance !== null)) return this.bjAfterInsurance();
+    this.timed(BJ_STEP_MS, () => {
+      if (this.bj !== bj || bj.step !== 'insurance') return;
+      for (const y of bj.players) if (y.insurance === null) y.insurance = 0;
+      this.bjAfterInsurance();
+    });
+    this.bjBots(() => {
+      if (this.bj !== bj || bj.step !== 'insurance') return;
+      for (const y of bj.players) if (this.player(y.id)!.bot && y.insurance === null) this.bjInsure(y.id, false);
+    });
+  }
+
+  bjInsure(id: string, take: boolean) {
+    const { bj, y, p } = this.bjSeat(id);
+    if (bj.step !== 'insurance' || y.insurance !== null) throw new GameError('No insurance to decide right now');
+    const cost = Math.floor(y.bet! / 2);
+    if (take) {
+      if (p.chips < cost) throw new GameError('Not enough chips');
+      p.chips -= cost;
+      y.staked += cost;
+      y.insurance = cost;
+      this.say(`${p.name} takes insurance`);
+    } else y.insurance = 0;
+    if (bj.players.every(z => z.insurance !== null)) this.bjAfterInsurance();
+  }
+
+  /** The bank peeks when it shows an Ace or a ten: a blackjack ends the round on the spot. */
+  private bjAfterInsurance() {
+    const bj = this.bj!;
+    const up = cardValue(bj.dealer[0]);
+    if ((up === 1 || up === 10) && isBlackjack(bj.dealer)) {
+      this.say(`${this.player(bj.bankerId)!.name}'s bank has Blackjack`);
+      return this.bjSettle();
+    }
+    bj.step = 'play';
+    this.bjNext();
+  }
+
+  /** Move to the first unfinished hand, or let the bank play once every hand is done. */
+  private bjNext() {
+    const bj = this.bj!;
+    for (let i = 0; i < bj.players.length; i++) {
+      const y = bj.players[i];
+      for (let k = 0; k < y.hands.length; k++) {
+        const hand = y.hands[k];
+        if (!hand.done && total(hand.cards).total >= 21) hand.done = true;
+        if (hand.done) continue;
+        bj.active = { i, hand: k };
+        return this.bjTurn();
+      }
+    }
+    this.bjBank();
+  }
+
+  private bjTurn() {
+    const bj = this.bj!;
+    const a = bj.active!;
+    const y = bj.players[a.i];
+    const p = this.player(y.id);
+    const ms = p?.connected && !p.leaving ? TURN_MS : AWAY_TURN_MS;
+    this.timed(ms, () => { if (this.bj === bj && bj.active === a) this.bjAct(y.id, 'stand'); });
+    if (p?.bot) {
+      this.bjBots(() => {
+        if (this.bj !== bj || bj.active !== a) return;
+        const hand = y.hands[a.hand];
+        const can = this.bjCan(y, hand);
+        this.bjAct(y.id, botMove(hand.cards, bj.dealer[0], can.double, can.split));
+      });
+    }
+  }
+
+  private bjCan(y: BJPlayer, hand: BJHand) {
+    const chips = this.player(y.id)!.chips;
+    const two = hand.cards.length === 2 && !hand.splitAces && !hand.done;
+    return {
+      double: two && chips >= hand.bet,
+      split: two && hand.cards[0][0] === hand.cards[1][0] && y.hands.length < 4 && chips >= hand.bet,
+    };
+  }
+
+  bjAct(id: string, action: BJAction) {
+    const bj = this.bj;
+    if (!bj || this.phase !== 'playing' || bj.step !== 'play' || !bj.active) throw new GameError("It's not your turn");
+    const y = bj.players[bj.active.i];
+    if (y.id !== id) throw new GameError("It's not your turn");
+    const hand = y.hands[bj.active.hand];
+    const p = this.player(id)!;
+    const can = this.bjCan(y, hand);
+    switch (action) {
+      case 'hit':
+        hand.cards.push(bj.deck.pop()!);
+        this.say(`${p.name} hits: ${total(hand.cards).total}`);
+        break;
+      case 'stand':
+        hand.done = true;
+        this.say(`${p.name} stands on ${total(hand.cards).total}`);
+        break;
+      case 'double':
+        if (!can.double) throw new GameError("You can't double now");
+        p.chips -= hand.bet;
+        y.staked += hand.bet;
+        hand.bet *= 2;
+        hand.doubled = true;
+        hand.cards.push(bj.deck.pop()!);
+        hand.done = true;
+        this.say(`${p.name} doubles: ${total(hand.cards).total}`);
+        break;
+      case 'split': {
+        if (!can.split) throw new GameError("You can't split now");
+        p.chips -= hand.bet;
+        y.staked += hand.bet;
+        const aces = hand.cards[0][0] === 'A';
+        const other: BJHand = { cards: [hand.cards.pop()!], bet: hand.bet, doubled: false, done: false, natural: false, splitAces: aces };
+        hand.splitAces = aces;
+        hand.cards.push(bj.deck.pop()!);
+        other.cards.push(bj.deck.pop()!);
+        // Split Aces get one card each.
+        if (aces) hand.done = other.done = true;
+        y.hands.splice(bj.active.hand + 1, 0, other);
+        this.say(`${p.name} splits`);
+        break;
+      }
+      default:
+        throw new GameError('Unknown move');
+    }
+    this.bjNext();
+  }
+
+  /** Every hand is done: the bank turns over its card and draws to 17, one card at a time. */
+  private bjBank() {
+    const bj = this.bj!;
+    bj.active = null;
+    bj.step = 'bank';
+    bj.holeShown = true;
+    this.turnDeadline = null;
+    this.schedule(BJ_DRAW_MS, () => this.bjBankStep());
+  }
+
+  private bjBankStep() {
+    const bj = this.bj;
+    if (!bj || bj.step !== 'bank') return;
+    // Nothing left to beat if every hand busted or was a blackjack.
+    const needed = bj.players.some(y => y.hands.some(hand => !hand.natural && total(hand.cards).total <= 21));
+    if (needed && bankDraws(bj.dealer)) {
+      bj.dealer.push(bj.deck.pop()!);
+      this.schedule(BJ_DRAW_MS, () => this.bjBankStep());
+    } else this.bjSettle();
+  }
+
+  /**
+   * Losing bets go to the bank first. Then winners are paid from the bank in seat order
+   * from its left until it runs dry.
+   */
+  private bjSettle() {
+    const bj = this.bj!;
+    bj.holeShown = true;
+    bj.active = null;
+    bj.step = 'done';
+    this.phase = 'showdown';
+    this.turnDeadline = null;
+    const banker = this.player(bj.bankerId)!;
+    const bankBJ = isBlackjack(bj.dealer);
+    let bankIn = 0;
+    const owed: { y: BJPlayer; profit: number }[] = [];
+    for (const y of bj.players) {
+      if (!y.bet) continue;
+      let back = 0;
+      let profit = 0;
+      for (const hand of y.hands) {
+        const r = settleHand(hand.cards, hand.bet, hand.natural, bj.dealer);
+        hand.result = r.result;
+        if (r.back === 0) bankIn += hand.bet;
+        else { back += hand.bet; profit += r.back - hand.bet; }
+      }
+      if (y.insurance) {
+        if (bankBJ) { back += y.insurance; profit += y.insurance * 2; } else bankIn += y.insurance;
+      }
+      this.player(y.id)!.chips += back;
+      y.net = back - y.staked;
+      owed.push({ y, profit });
+    }
+    banker.chips += bankIn;
+    let bankNet = bankIn;
+    for (const { y, profit } of owed) {
+      const pay = Math.min(profit, banker.chips);
+      banker.chips -= pay;
+      this.player(y.id)!.chips += pay;
+      y.net! += pay;
+      bankNet -= pay;
+      if (pay < profit) this.say(`The bank ran dry: ${this.player(y.id)!.name} gets ${fmt(pay)} of ${fmt(profit)}`);
+    }
+    bj.bankNet = bankNet;
+    const sign = (n: number) => (n > 0 ? `+${fmt(n)}` : n < 0 ? `-${fmt(-n)}` : 'even');
+    this.say(`Bank ${total(bj.dealer).total > 21 ? 'busts' : `has ${total(bj.dealer).total}`}: ` +
+      [...owed.map(o => `${this.player(o.y.id)!.name} ${sign(o.y.net!)}`), `${banker.name} ${sign(bankNet)}`].join(', '));
+    this.bjReact();
+    this.schedule(BJ_DONE_MS, () => this.nextHand());
+  }
+
+  private bjReact() {
+    const bj = this.bj!;
+    if (!this.practice || Math.random() < 0.5) return;
+    const big = this.bb * 4;
+    const options: [string, string[]][] = [];
+    for (const y of bj.players) {
+      if (!this.player(y.id)?.bot || y.net === undefined) continue;
+      if (y.net >= big) options.push([y.id, ['fire', 'money', 'nuts']]);
+      if (y.net <= -big) options.push([y.id, ['salty', 'cry', 'skull']]);
+    }
+    this.queueReact(options);
+  }
+
+  private bjBots(fn: () => void) {
+    if (this.bj?.players.some(y => this.player(y.id)?.bot)) this.botSchedule(fn);
+  }
+
+  /** A deadline everyone can see as a countdown. */
+  private timed(ms: number, fn: () => void) {
+    this.turnDeadline = Date.now() + ms;
+    this.turnTotal = ms;
+    this.schedule(ms, fn);
+  }
+
+  private bjView(forId: string): BJView {
+    const bj = this.bj!;
+    const a = bj.active;
+    const activeId = a ? bj.players[a.i].id : null;
+    const mine = bj.players.find(y => y.id === forId);
+    const can = a && activeId === forId ? this.bjCan(mine!, mine!.hands[a.hand]) : { double: false, split: false };
+    const shown = bj.holeShown ? bj.dealer : bj.dealer.slice(0, 1);
+    return {
+      min: bj.min,
+      max: bj.max,
+      bankerId: bj.bankerId,
+      step: bj.step,
+      players: bj.players.map(y => ({
+        id: y.id, bet: y.bet, insurance: y.insurance, net: y.net,
+        hands: y.hands.map(hand => ({
+          cards: hand.cards, bet: hand.bet, ...total(hand.cards), doubled: hand.doubled, done: hand.done, result: hand.result,
+        })),
+      })),
+      dealer: bj.dealer.map((c, i) => (i === 1 && !bj.holeShown ? null : c)),
+      dealerTotal: shown.length ? total(shown).total : null,
+      bankNet: bj.bankNet,
+      active: a ? { id: activeId!, hand: a.hand } : null,
+      canDouble: can.double,
+      canSplit: can.split,
+      insuranceCost: Math.floor((mine?.bet ?? 0) / 2),
+    };
   }
 
   // ---------- internals ----------
@@ -812,8 +1216,19 @@ export class Room {
     const h = this.hand;
     const me = h?.hp.get(forId);
     const myChips = this.player(forId)?.chips ?? 0;
+    const bj = this.bj;
     const seats: SeatView[] = this.players.map(p => {
       const x = h?.hp.get(p.id);
+      const y = bj?.players.find(z => z.id === p.id);
+      if (bj) {
+        return {
+          id: p.id, name: p.name, chips: p.chips, connected: p.connected, bot: p.bot,
+          inHand: !!y?.bet || p.id === bj.bankerId, folded: false, allIn: false,
+          bet: bj.step === 'done' ? 0 : y?.staked ?? 0, cards: [],
+          won: Math.max(0, (p.id === bj.bankerId ? bj.bankNet : y?.net) ?? 0) || undefined,
+          waiting: (bj.step === 'bet' && y?.bet === null) || (bj.step === 'insurance' && y?.insurance === null),
+        };
+      }
       let cards: (Card | null)[] = [];
       if (x && (!x.folded || p.id === forId)) {
         const show = p.id === forId || (h!.revealed && !x.folded);
@@ -847,7 +1262,7 @@ export class Room {
       you: forId,
       hostId: this.hostId,
       phase: this.phase,
-      game: h?.game ?? null,
+      game: bj ? 'blackjack' : h?.game ?? null,
       handNo: this.handNo,
       street: h?.street ?? null,
       dealerId: this.dealerId,
@@ -861,7 +1276,7 @@ export class Room {
       split: split ?? null,
       target: h?.target ?? null,
       pot,
-      toAct: h?.toAct ?? null,
+      toAct: bj ? bj.active && bj.players[bj.active.i].id : h?.toAct ?? null,
       turnMsLeft: this.turnDeadline ? Math.max(0, this.turnDeadline - Date.now()) : null,
       turnMsTotal: this.turnTotal,
       currentBet,
@@ -878,6 +1293,7 @@ export class Room {
       winners: h?.winners ?? [],
       log: this.log.slice(-12),
       chat: this.chat,
+      bj: bj ? this.bjView(forId) : null,
     };
   }
 }

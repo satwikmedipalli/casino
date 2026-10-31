@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { GAMES, SPLITS, fmt, isAK47Wild } from '../shared/types';
 import type { Card, ClientMsg, SeatView, TableView } from '../shared/types';
 import { CardView, ChipStack, FlipCard } from './Card';
+import { BJActions, BJBanner, BJDealer, BJMyHands, BJSeatHands, useBlackjackSounds } from './Blackjack';
 import { ChatButton, ChatPanel, SeatBubble, useChat } from './Chat';
 import type { Poker } from './net';
 import { sfx } from './sound';
@@ -138,7 +139,15 @@ export function Table({ poker }: { poker: Poker }) {
       }
       setTimeout(() => sfx.win(), delay * 1000 + 250);
     }
-    if (s.toAct === s.you && prev.toAct !== s.you) sfx.turn();
+    const bj = s.bj;
+    if (bj?.step === 'done' && prev.bj?.step !== 'done') {
+      const nets: [string, number | undefined][] = [...bj.players.map(y => [y.id, y.net] as [string, number | undefined]), [bj.bankerId, bj.bankNet]];
+      for (const [id, net] of nets) {
+        const g = geo.get(id);
+        if (g && net && net > 0) add.push({ key: `bj${s.handNo}-${id}`, amount: net, from: potPt, to: g.seat, delay: 0.6 });
+      }
+    }
+    if (s.toAct === s.you && prev.toAct !== s.you && !s.bj) sfx.turn();
     if (add.length) {
       setGhosts(g => [...g, ...add]);
       const keys = new Set(add.map(a => a.key));
@@ -146,8 +155,12 @@ export function Table({ poker }: { poker: Poker }) {
     }
   }, [s]);
 
+  useBlackjackSounds(s.bj, s.you);
+  // Restarts the turn ring after every blackjack move (each one resets the timer).
+  const bjMoves = s.bj?.players.map(y => y.hands.map(h => h.cards.length).join('.')).join('|') ?? '';
   const me = s.seats.find(x => x.id === s.you);
-  const dealer = s.seats.find(x => x.id === s.dealerId);
+  const dealer = s.bj ? undefined : s.seats.find(x => x.id === s.dealerId);
+  const bankName = s.bj ? (s.bj.bankerId === s.you ? 'You' : s.seats.find(x => x.id === s.bj!.bankerId)?.name ?? '') : '';
   const inHandOrder = s.seats.filter(x => x.inHand);
   const dealDelay = (seat: SeatView, i: number) => {
     const n = inHandOrder.length;
@@ -189,7 +202,7 @@ export function Table({ poker }: { poker: Poker }) {
           <div>{gameName(s.game)}</div>
           <small>
             {s.target ? `${s.target.farthest ? 'Farthest from' : 'Closest to'} ${s.target.value} · ` : ''}
-            Blinds {fmt(s.blinds.sb)}/{fmt(s.blinds.bb)}
+            {s.bj ? `Bets ${fmt(s.bj.min)} to ${fmt(s.bj.max)}` : `Blinds ${fmt(s.blinds.sb)}/${fmt(s.blinds.bb)}`}
           </small>
         </div>
         <div className="top-right">
@@ -206,7 +219,9 @@ export function Table({ poker }: { poker: Poker }) {
           <div className="felt" />
           <div className="felt-logo">Poker Night</div>
 
-          {boards.map((b, bi) => (
+          {s.bj && <BJDealer bj={s.bj} bankName={bankName} width={boardW} x={center.x} y={center.y} />}
+
+          {!s.bj && boards.map((b, bi) => (
           <div key={bi} className="board" style={{ left: b.x, top: b.y }}>
             {b.label && <span className={`board-label ${b.label === 'LOW' ? 'low' : ''}`}>{b.label}</span>}
             {[0, 1, 2, 3, 4].map(i => b.cards[i]
@@ -249,6 +264,7 @@ export function Table({ poker }: { poker: Poker }) {
               .filter(Boolean).join(' ');
             return (
               <div key={seat.id} className={cls} style={{ left: g.seat.x, top: g.seat.y }}>
+                {s.bj && !isMe && <BJSeatHands bj={s.bj} id={seat.id} width={miniW * 1.1} />}
                 {!isMe && seat.cards.length > 0 && (
                   <div className="mini-cards">
                     {seat.cards.map((c, i) => {
@@ -264,7 +280,7 @@ export function Table({ poker }: { poker: Poker }) {
                 <div className="avatar" style={{ '--hue': hueOf(seat.name) } as Vars}>
                   {initials(seat.name)}
                   {acting && s.turnMsLeft != null && (
-                    <TimerRing key={`${s.handNo}-${s.street}-${s.currentBet}-${seat.id}`} left={s.turnMsLeft} total={s.turnMsTotal} />
+                    <TimerRing key={`${s.handNo}-${s.street}-${s.currentBet}-${seat.id}-${bjMoves}`} left={s.turnMsLeft} total={s.turnMsTotal} />
                   )}
                 </div>
                 <div className="plate">
@@ -272,6 +288,7 @@ export function Table({ poker }: { poker: Poker }) {
                   <div className="chips-amt">{seat.allIn && s.phase === 'playing' ? 'ALL IN' : fmt(seat.chips)}</div>
                 </div>
                 {seat.handName && !isMe && !s.split && <div className="hand-name">{seat.handName}</div>}
+                {s.bj?.bankerId === seat.id && <div className="bank-tag">BANK</div>}
                 {!seat.connected && <div className="away-tag">away</div>}
                 {seat.waiting && <div className="away-tag">choosing…</div>}
                 {fresh[seat.id] && <SeatBubble key={fresh[seat.id].id} m={fresh[seat.id]} below={g.seat.y < size.h * 0.3} />}
@@ -285,6 +302,7 @@ export function Table({ poker }: { poker: Poker }) {
           {s.phase === 'choosing' && s.chooserId !== s.you && (
             <div className="table-banner">{dealer?.name ?? 'Dealer'} is picking the game…</div>
           )}
+          {s.bj?.step === 'done' && <BJBanner bj={s.bj} seats={s.seats} you={s.you} />}
           {showWinners && (
             <div className="table-banner win">
               {s.winners.map(w => {
@@ -297,7 +315,7 @@ export function Table({ poker }: { poker: Poker }) {
       </div>
 
       <div className="hand-area">
-        {me && me.cards.length > 0
+        {s.bj ? <BJMyHands bj={s.bj} you={s.you} /> : me && me.cards.length > 0
           ? s.split
             ? <SplitCards key={s.handNo} s={s} me={me} send={send} delay={dealDelay(me, 0)} />
             : <MyCards key={s.handNo} s={s} me={me} picked={picked} onTap={tapCard} delay={dealDelay(me, 0)} />
@@ -307,7 +325,9 @@ export function Table({ poker }: { poker: Poker }) {
         </div>
       </div>
 
-      {choosing && me
+      {s.bj
+        ? <BJActions s={s} bj={s.bj} me={me} send={send} />
+        : choosing && me
         ? <PendingControls s={s} me={me} picked={picked} setPicked={setPicked} send={send} />
         : <Actions s={s} me={me} send={send} />}
 
@@ -579,10 +599,15 @@ function WaitingRoom({ s, send, toast }: { s: TableView; send: (m: ClientMsg) =>
 
 function GamePicker({ s, send }: { s: TableView; send: (m: ClientMsg) => void }) {
   const [custom, setCustom] = useState(false);
+  const [blackjack, setBlackjack] = useState(false);
+  const seated = s.seats.filter(x => x.chips > 0).length;
+  const myChips = s.seats.find(x => x.id === s.you)?.chips ?? 0;
+
   const [target, setTarget] = useState('500');
   const [farthest, setFarthest] = useState(false);
   const value = Number(target);
   const valid = target.trim() !== '' && Number.isInteger(value) && value >= 0 && value <= 999;
+  if (blackjack) return <BlackjackLimits s={s} myChips={myChips} send={send} back={() => setBlackjack(false)} />;
 
   if (custom) {
     return (
@@ -608,15 +633,47 @@ function GamePicker({ s, send }: { s: TableView; send: (m: ClientMsg) => void })
     <div className="sheet">
       <div className="sheet-title">{s.practice ? 'Pick the next game' : "You're dealing, pick the game"}</div>
       <div className="games">
-        {GAMES.map(g => (
-          <button key={g.id} className={`game ${g.ready ? '' : 'soon'}`} disabled={!g.ready}
-            onClick={() => (g.id === 'triple9_custom' ? setCustom(true) : send({ t: 'choose', game: g.id }))}>
-            <strong>{g.name}</strong>
-            <span>{g.ready ? g.blurb : 'Coming soon'}</span>
-          </button>
-        ))}
+        {GAMES.map(g => {
+          const tooMany = seated > g.maxPlayers;
+          return (
+            <button key={g.id} className={`game ${g.ready ? '' : 'soon'} ${g.id === 'blackjack' ? 'bj' : ''}`} disabled={!g.ready || tooMany}
+              onClick={() => (g.id === 'triple9_custom' ? setCustom(true) : g.id === 'blackjack' ? setBlackjack(true) : send({ t: 'choose', game: g.id }))}>
+              <strong>{g.name}</strong>
+              <span>{!g.ready ? 'Coming soon' : tooMany ? `Max ${g.maxPlayers} players` : g.blurb}</span>
+            </button>
+          );
+        })}
       </div>
       {!s.practice && s.turnMsLeft != null && <p className="muted center">Hold'em starts automatically if you don't pick.</p>}
+    </div>
+  );
+}
+
+/** Blackjack: whoever picks it is the bank and sets the table limits. */
+function BlackjackLimits({ s, myChips, send, back }: { s: TableView; myChips: number; send: (m: ClientMsg) => void; back: () => void }) {
+  const toCents = (v: string) => Math.round(parseFloat(v) * 100);
+  const [min, setMin] = useState(fmt(s.blinds.bb));
+  const [max, setMax] = useState(fmt(Math.min(s.blinds.bb * 10, myChips)));
+  const lo = toCents(min);
+  const hi = toCents(max);
+  const problem = !(lo > 0) ? 'Set a min bet'
+    : !(hi >= lo) ? 'Max bet must be at least the min bet'
+    : hi > myChips ? `As the bank you need the max bet in chips (you have ${fmt(myChips)})`
+    : null;
+  return (
+    <div className="sheet">
+      <div className="sheet-title">Blackjack</div>
+      <p className="muted">You're the bank: everyone else plays against your chips. Set the table limits.</p>
+      <div className="row">
+        <label className="field"><span>Min bet</span><input inputMode="decimal" value={min} onChange={e => setMin(e.target.value)} /></label>
+        <label className="field"><span>Max bet</span><input inputMode="decimal" value={max} onChange={e => setMax(e.target.value)} /></label>
+      </div>
+      <p className="muted">Blackjack pays 3 to 2. Doubles, splits and insurance allowed. The bank hits to 16 and stands on 17.</p>
+      {problem && <p className="muted bj-problem">{problem}</p>}
+      <div className="row">
+        <button className="btn" onClick={back}>Back</button>
+        <button className="btn primary" disabled={!!problem} onClick={() => send({ t: 'choose', game: 'blackjack', bj: { min: lo, max: hi } })}>Deal</button>
+      </div>
     </div>
   );
 }
