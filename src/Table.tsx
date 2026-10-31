@@ -346,15 +346,9 @@ function MyCards({ s, me, picked, onTap, delay }: {
     }
     return grouped ? Math.floor(i / 2) : null;
   };
-  const stop = () => setPeek(false);
   return (
     <div className={`my-cards ${me.folded ? 'folded' : ''} ${up ? 'up' : ''} ${choosing ? 'choosing' : ''}`}
-      onPointerDown={e => {
-        if (choosing) return;
-        try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ok */ }
-        setPeek(true);
-      }}
-      onPointerUp={stop} onPointerCancel={stop} onContextMenu={e => e.preventDefault()}>
+      onClick={() => { if (!choosing) setPeek(v => !v); }} onContextMenu={e => e.preventDefault()}>
       {me.cards.map((c, i) => {
         const pair = pairOf(i);
         const isPicked = picked.includes(i) && !arranging;
@@ -371,7 +365,7 @@ function MyCards({ s, me, picked, onTap, delay }: {
           </div>
         );
       })}
-      {!up && !me.folded && <div className="peek-hint">Hold to peek</div>}
+      {!up && !me.folded && <div className="peek-hint">Tap to look</div>}
     </div>
   );
 }
@@ -401,18 +395,12 @@ function SplitCards({ s, me, send, delay }: { s: TableView; me: SeatView; send: 
     send({ t: 'arrange', cards: next });
     setSel(null);
   };
-  const stop = () => setPeek(false);
   const groups = [[...Array(split.sizes[0]).keys()], [...Array(n - split.sizes[0]).keys()].map(k => k + split.sizes[0])];
 
   return (
     <div className={`split-hand ${me.folded ? 'folded' : ''}`}>
       <div className={`my-cards split ${up ? 'up' : ''}`}
-        onPointerDown={e => {
-          if (swapping) return;
-          try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ok */ }
-          setPeek(true);
-        }}
-        onPointerUp={stop} onPointerCancel={stop} onContextMenu={e => e.preventDefault()}>
+        onClick={() => { if (!swapping) setPeek(v => !v); }} onContextMenu={e => e.preventDefault()}>
         {groups.map((idxs, g) => (
           <div key={g} className="split-group">
             <div className="split-cards">
@@ -427,10 +415,10 @@ function SplitCards({ s, me, send, delay }: { s: TableView; me: SeatView; send: 
             <div className={`split-label ${s.split === 'highlow' && g === 1 ? 'low' : ''}`}>{split.labels[g]}</div>
           </div>
         ))}
-        {!up && !me.folded && <div className="peek-hint">Hold to peek</div>}
+        {!up && !me.folded && <div className="peek-hint">Tap to look</div>}
       </div>
       {canSwap && (
-        <button className={`pill swap-btn ${swapping ? 'on' : ''}`} onClick={() => { setSwapping(!swapping); setSel(null); }}>
+        <button className={`pill swap-btn ${swapping ? 'on' : ''}`} onClick={() => { setSwapping(!swapping); setSel(null); setPeek(true); }}>
           {swapping ? (sel == null ? 'Tap a card to move · Done' : 'Now tap a card in the other hand') : '⇄ Swap cards'}
         </button>
       )}
