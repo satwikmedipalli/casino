@@ -15,7 +15,7 @@ const TALL = 0.62; // phone: tall oval (width / height)
 const WIDE = 1.9;  // laptop: wide oval
 const SWIPE = 60;
 
-const gameName = (id: string | null) => GAMES.find(g => g.id === id)?.name ?? 'Poker Night';
+const gameName = (id: string | null) => GAMES.find(g => g.id === id)?.name ?? 'Casino';
 const initials = (name: string) => name.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
 /** A stable color per player so everyone is easy to tell apart. */
 const hueOf = (name: string) => [...name].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
@@ -35,7 +35,7 @@ function TimerRing({ left, total }: { left: number; total: number }) {
 async function shareTable(code: string, toast: (m: string) => void) {
   const url = `${location.origin}/?code=${code}`;
   try {
-    if (navigator.share) await navigator.share({ title: 'Poker Night', text: `Join my poker table. Code: ${code}`, url });
+    if (navigator.share) await navigator.share({ title: 'Casino', text: `Join my table. Code: ${code}`, url });
     else { await navigator.clipboard.writeText(url); toast('Link copied'); }
   } catch { /* cancelled */ }
 }
@@ -168,6 +168,12 @@ export function Table({ poker }: { poker: Poker }) {
     return (k + i * n) * 0.09;
   };
   const showWinners = s.phase === 'showdown' && s.winners.length > 0;
+  const actingSeat = s.seats.find(x => x.id === s.toAct);
+  const turnCls = s.phase !== 'playing' || !actingSeat ? '' : actingSeat.id === s.you ? 'turn-me' : 'turn-other';
+  const turnHue = actingSeat ? hueOf(actingSeat.name) : 190;
+  const iWon = s.winners.find(w => w.id === s.you);
+  const topHand = (iWon ?? s.winners[0])?.handName;
+  const jackpot = iWon ? (topHand ? topHand.toUpperCase() : 'YOU WIN') : topHand ? topHand.toUpperCase() : null;
   const isWild = (c: Card | null) => s.wild && !!c && isAK47Wild(c);
 
   // Card picking for drop / arrange steps. Indexes into your hole cards.
@@ -214,10 +220,10 @@ export function Table({ poker }: { poker: Poker }) {
       {!poker.connected && <div className="reconnecting">Reconnecting…</div>}
 
       <div className="table-wrap" ref={wrapRef}>
-        <div className={`table ${size.wide ? 'wide' : ''}`} style={{ width: size.w, height: size.h }}>
+        <div className={`table ${size.wide ? 'wide' : ''} ${turnCls}`} style={{ width: size.w, height: size.h, '--turn-hue': turnHue } as Vars}>
           <div className="rail" />
           <div className="felt" />
-          <div className="felt-logo">Poker Night</div>
+          <div className="felt-logo">CASINO</div>
 
           {s.bj && <BJDealer bj={s.bj} bankName={bankName} width={boardW} x={center.x} y={center.y} />}
 
@@ -303,6 +309,8 @@ export function Table({ poker }: { poker: Poker }) {
             <div className="table-banner">{dealer?.name ?? 'Dealer'} is picking the game…</div>
           )}
           {s.bj?.step === 'done' && <BJBanner bj={s.bj} seats={s.seats} you={s.you} />}
+          {showWinners && <Fireworks key={`fw-${s.handNo}`} seed={s.handNo} big={!!iWon} />}
+          {showWinners && jackpot && <div key={`jp-${s.handNo}`} className="jackpot" style={{ fontSize: Math.min(44, Math.floor((size.w + 40) / (Math.min(jackpot.length, 16) * 0.78))) }}>{jackpot}</div>}
           {showWinners && (
             <div className="table-banner win">
               {s.winners.map(w => {
@@ -674,6 +682,37 @@ function BlackjackLimits({ s, myChips, send, back }: { s: TableView; myChips: nu
         <button className="btn" onClick={back}>Back</button>
         <button className="btn primary" disabled={!!problem} onClick={() => send({ t: 'choose', game: 'blackjack', bj: { min: lo, max: hi } })}>Deal</button>
       </div>
+    </div>
+  );
+}
+
+const SPARK_COLORS = ['#ff2bd6', '#19e8ff', '#ffd84d', '#8b5cff', '#2bff9a', '#ffffff'];
+
+/** Neon fireworks over the table at showdown. Deterministic per hand so re-renders don't reshuffle them. */
+function Fireworks({ seed, big }: { seed: number; big: boolean }) {
+  let x = (seed * 9301 + 49297) % 233280;
+  const rnd = () => { x = (x * 9301 + 49297) % 233280; return x / 233280; };
+  const bursts = Array.from({ length: big ? 6 : 3 }, (_, b) => {
+    const color = SPARK_COLORS[Math.floor(rnd() * SPARK_COLORS.length)];
+    const n = 18;
+    return {
+      left: `${15 + rnd() * 70}%`, top: `${12 + rnd() * 45}%`, delay: 0.45 + b * 0.32 + rnd() * 0.15,
+      sparks: Array.from({ length: n }, (_, i) => {
+        const a = (i / n) * Math.PI * 2 + rnd() * 0.2;
+        const r = 46 + rnd() * 34;
+        return { x: Math.cos(a) * r, y: Math.sin(a) * r, a: (a * 180) / Math.PI, c: rnd() < 0.7 ? color : SPARK_COLORS[Math.floor(rnd() * 6)] };
+      }),
+    };
+  });
+  return (
+    <div className="fireworks" aria-hidden="true">
+      {bursts.map((b, bi) => (
+        <div key={bi} className="burst" style={{ left: b.left, top: b.top }}>
+          {b.sparks.map((p, i) => (
+            <i key={i} className="spark" style={{ '--x': `${p.x}px`, '--y': `${p.y}px`, '--a': `${p.a}deg`, '--c': p.c, '--d': `${b.delay}s` } as Vars} />
+          ))}
+        </div>
+      ))}
     </div>
   );
 }

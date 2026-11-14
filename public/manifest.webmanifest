@@ -1,11 +1,11 @@
 {
-  "name": "Poker Night",
-  "short_name": "Poker Night",
+  "name": "Casino",
+  "short_name": "Casino",
   "start_url": "/",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#0b1a12",
-  "theme_color": "#0b1a12",
+  "background_color": "#06030d",
+  "theme_color": "#06030d",
   "icons": [
     {
       "src": "/icon-192.png",

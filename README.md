@@ -1,4 +1,4 @@
-# Poker Night
+# Casino
 
 Poker for friends, played in the browser and added to the iPhone home screen.
 The dealer rotates every hand and picks the game: Texas Hold'em, Irish, 3 Card, AK47,

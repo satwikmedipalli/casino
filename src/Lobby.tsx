@@ -15,8 +15,12 @@ function Hero() {
         <CardView card="As" width={78} className="fan f2" />
         <CardView card="Kd" width={78} className="fan f3" />
       </div>
-      <h1>Poker Night</h1>
-      <p className="tagline">Ten games · one table · your crew</p>
+      <div className="sign">
+        <h1 aria-label="Casino">
+          {'CASINO'.split('').map((ch, i) => <span key={i} className={i === 3 ? 'flick' : undefined}>{ch}</span>)}
+        </h1>
+      </div>
+      <p className="tagline">Poker · Blackjack · your crew</p>
     </div>
   );
 }
