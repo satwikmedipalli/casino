@@ -270,6 +270,10 @@ body:has(.lobby)::before {
   font-size: 10px; font-weight: 800; letter-spacing: .24em; color: var(--pink-2); text-shadow: 0 0 8px rgba(255,43,214,.8);
 }
 .board-label.low { color: var(--cyan-2); text-shadow: 0 0 8px rgba(25,232,255,.8); }
+/* Stacked boards on phones: labels sit at the left so the pot fits in the gap between the boards. */
+.board.stacked .board-label { left: 2px; transform: none; top: -15px; font-size: 9px; letter-spacing: .18em; }
+.stack.pot.compact .discs { display: none; }
+.stack.pot.compact .amt { font-size: 11px; padding: 1px 8px; }
 
 /* ---------- cards ---------- */
 .card {
@@ -392,13 +396,15 @@ body:has(.lobby)::before {
 .away-tag { font-size: 10px; color: var(--muted); margin-top: 2px; }
 
 .dealer-btn {
-  position: absolute; transform: translate(-50%, -50%); z-index: 2;
-  width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center;
+  /* A badge on the dealer's avatar: always visible, never under a name plate. */
+  position: absolute; right: -8px; top: -6px; z-index: 2;
+  width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
   font-family: var(--serif); font-weight: 900; font-size: 12px; color: #fff;
   background: #0c0620; border: 2px solid #fff;
   box-shadow: 0 0 6px #fff, 0 0 14px rgba(255,255,255,.6);
-  transition: left .7s cubic-bezier(.3,.7,.4,1), top .7s cubic-bezier(.3,.7,.4,1);
+  animation: dealerIn .4s ease-out;
 }
+@keyframes dealerIn { from { transform: scale(0); } to { transform: scale(1); } }
 
 /* ---------- chips ---------- */
 .stack {
@@ -599,6 +605,12 @@ input[type=range] { width: 100%; accent-color: var(--pink); height: 28px; }
 .swap-btn.on { background: var(--cyan); color: #021216; border-color: var(--cyan-2); box-shadow: var(--glow-cyan); }
 .hero-cards .fan { position: absolute; }
 .my-cards.split .peek-hint { bottom: auto; top: -14px; }
+.swap-mini {
+  align-self: center; margin-bottom: 22px; width: 34px; height: 34px; border-radius: 50%; flex: none;
+  border: 1px solid var(--cyan); background: rgba(8,4,22,.9); color: var(--cyan-2); font-size: 16px; font-weight: 800;
+  box-shadow: 0 0 10px rgba(25,232,255,.35);
+}
+.swap-mini.on { background: var(--cyan); color: #021216; box-shadow: var(--glow-cyan); }
 
 /* ---------- chat ---------- */
 .topbar { display: grid; grid-template-columns: 1fr auto 1fr; }

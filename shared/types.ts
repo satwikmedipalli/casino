@@ -165,6 +165,7 @@ export type ServerMsg =
   | { t: 'error'; message: string; fatal?: boolean }
   | { t: 'left' };
 
+/** Chips as dollars and cents, always two decimals, so 10, 9.80 and 1 read as 10.00, 9.80 and 1.00. */
 export function fmt(cents: number): string {
-  return cents % 100 === 0 ? String(cents / 100) : (cents / 100).toFixed(2);
+  return (cents / 100).toFixed(2);
 }

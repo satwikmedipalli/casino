@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { GAMES, SPLITS, fmt, isAK47Wild } from '../shared/types';
 import type { Card, ClientMsg, SeatView, TableView } from '../shared/types';
 import { CardView, ChipStack, FlipCard } from './Card';
@@ -61,10 +61,10 @@ export function Table({ poker }: { poker: Poker }) {
     const measure = () => {
       const W = el.clientWidth - 90;
       const H = el.clientHeight - 120;
-      const wide = W > H * 1.2;
-      const ratio = wide ? WIDE : TALL;
+      // Fill the space we have: the oval's shape follows the screen, between tall and wide.
+      const ratio = Math.min(WIDE, Math.max(TALL, W / H));
       const w = Math.max(180, Math.min(W, H * ratio));
-      setSize({ w, h: w / ratio, wide });
+      setSize({ w, h: w / ratio, wide: ratio > 1.2 });
     };
     measure();
     const ro = new ResizeObserver(measure);
@@ -78,7 +78,7 @@ export function Table({ poker }: { poker: Poker }) {
   const geo = useMemo(() => {
     const n = s.seats.length;
     const cx = size.w / 2, cy = size.h / 2, rx = size.w / 2, ry = size.h / 2;
-    const map = new Map<string, { seat: Pt; bet: Pt; button: Pt }>();
+    const map = new Map<string, { seat: Pt; bet: Pt }>();
     s.seats.forEach((seat, i) => {
       const k = (i - meIndex + n) % n;
       const a = Math.PI / 2 + (k * 2 * Math.PI) / n;
@@ -86,29 +86,54 @@ export function Table({ poker }: { poker: Poker }) {
       // Seats pulled in a little top and bottom so cards above the top seat clear the header.
       // Upper and side seats have their name plate below them, so their bets sit further in.
       const sin = Math.sin(a);
+      // With two boards stacked in the middle (phones), bets sit beside their seat instead of
+      // out over the boards.
+      const stackedBoards = (s.split === 'double' || s.split === 'highlow') && !(size.wide && size.w >= 560);
+      const sideBet = at(0.82, -0.3);
+      // Your own seat drops into the margin below the table when two boards need the height.
+      const fy = stackedBoards && k === 0 ? 1.16 : size.wide ? 0.98 : 0.93;
       map.set(seat.id, size.wide
-        ? { seat: at(1.02, 0, 0.98), bet: at(sin < -0.3 ? 0.52 : 0.66), button: at(0.8, 0.22) }
-        : { seat: at(1, 0, 0.93), bet: at(sin < 0.5 ? 0.46 : 0.62), button: at(0.76, 0.35) });
+        ? { seat: at(1.02, 0, fy), bet: stackedBoards ? sideBet : at(sin < -0.3 ? 0.52 : 0.66) }
+        : { seat: at(1, 0, fy), bet: stackedBoards ? sideBet : at(sin < 0.5 ? 0.46 : 0.62) });
     });
     return map;
-  }, [ids, meIndex, size.w, size.h, size.wide]);
+  }, [ids, meIndex, size.w, size.h, size.wide, s.split]);
   const center: Pt = { x: size.w / 2, y: size.h / 2 };
   const twoBoards = s.split === 'double' || s.split === 'highlow';
   // Leave room for the side seats so their cards never cover the board.
-  const boardW = size.wide
-    ? Math.min(twoBoards ? 50 : 64, (size.w * (twoBoards ? 0.74 : 0.5)) / (twoBoards ? 11 : 5.4))
-    : Math.min(52, (size.w - 92) / 5.3);
+  // Two boards sit side by side only on a table wide enough for ten cards; on phones they stack.
+  const sideBySide = size.wide && size.w >= 560;
+  const stacked = twoBoards && !sideBySide;
+  // Stacked boards fit between the top seat's name plate and your seat: label, board, a row
+  // for the second label and the pot, then the second board.
+  const seatFy = size.wide ? 0.98 : 0.93; // matches the seat geometry above
+  const topClear = center.y - (size.h / 2) * seatFy + 60;
+  const bottomClear = center.y + (size.h / 2) * 1.16 - 44; // your seat sits lower in this layout
+  const stackH = bottomClear - topClear - 8;
+  // Seats on the left and right edges reach into the table; the more seats, the wider they reach.
+  const nSeats = s.seats.length;
+  const sideRoom = nSeats >= 7 ? 160 : nSeats >= 5 ? 130 : 92;
+  const boardW = sideBySide
+    ? Math.min(50, (size.w * 0.74) / 11)
+    : stacked
+    ? Math.max(24, Math.min(52, (size.w - sideRoom - 40) / 5.3, (stackH - 46) / 2 / 1.4))
+    : size.wide
+    ? Math.min(64, (size.w * 0.5) / 5.4, (size.h * 0.34) / 1.4)
+    : Math.min(52, (size.w - sideRoom) / 5.3, (size.h * 0.34) / 1.4);
   const cardH = boardW * 1.4;
   const labels = s.split === 'highlow' ? ['HIGH', 'LOW'] : ['BOARD 1', 'BOARD 2'];
   const rowW = boardW * 5 + 16;
+  const stackMid = (topClear + bottomClear) / 2;
   const boards = !twoBoards
     ? [{ cards: s.board, x: center.x, y: center.y, label: '' }]
-    : size.wide // side by side on a wide table, stacked on a tall one
+    : sideBySide
       ? [0, 1].map(i => ({ cards: i ? s.board2 : s.board, x: center.x + (i ? 1 : -1) * (rowW / 2 + 10), y: center.y + 6, label: labels[i] }))
-      : [0, 1].map(i => ({ cards: i ? s.board2 : s.board, x: center.x, y: center.y + (i ? 1 : -1) * (cardH / 2 + 10), label: labels[i] }));
-  const potPt: Pt = size.wide
+      : [0, 1].map(i => ({ cards: i ? s.board2 : s.board, x: center.x, y: stackMid + 8 + (i ? 1 : -1) * (cardH / 2 + 14), label: labels[i] }));
+  const potPt: Pt = stacked
+    ? { x: center.x + rowW / 2 - 30, y: stackMid + 8 }
+    : size.wide
     ? { x: center.x, y: center.y - cardH / 2 - 44 }
-    : { x: center.x, y: twoBoards ? center.y - cardH - 64 : center.y + cardH / 2 + 34 };
+    : { x: center.x, y: center.y + cardH / 2 + 34 };
   const miniW = size.wide ? 30 : Math.min(26, size.w * 0.085);
 
   // ---- sounds and chip movement driven by state changes ----
@@ -228,7 +253,7 @@ export function Table({ poker }: { poker: Poker }) {
           {s.bj && <BJDealer bj={s.bj} bankName={bankName} width={boardW} x={center.x} y={center.y} />}
 
           {!s.bj && boards.map((b, bi) => (
-          <div key={bi} className="board" style={{ left: b.x, top: b.y }}>
+          <div key={bi} className={`board ${stacked ? 'stacked' : ''}`} style={{ left: b.x, top: b.y }}>
             {b.label && <span className={`board-label ${b.label === 'LOW' ? 'low' : ''}`}>{b.label}</span>}
             {[0, 1, 2, 3, 4].map(i => b.cards[i]
               ? <CardView key={`${s.handNo}-${bi}-${i}`} card={b.cards[i]} width={boardW} className="flip-in" wild={isWild(b.cards[i])}
@@ -238,7 +263,7 @@ export function Table({ poker }: { poker: Poker }) {
           ))}
 
           {s.pot > 0 && (
-            <ChipStack amount={s.pot} label="Pot" className={`pot ${showWinners ? 'paying' : ''}`}
+            <ChipStack amount={s.pot} label="Pot" className={`pot ${stacked ? 'compact' : ''} ${showWinners ? 'paying' : ''}`}
               style={{ left: potPt.x, top: potPt.y }} />
           )}
 
@@ -258,9 +283,6 @@ export function Table({ poker }: { poker: Poker }) {
               }} />
           ))}
 
-          {dealer && geo.get(dealer.id) && (
-            <div className="dealer-btn" style={{ left: geo.get(dealer.id)!.button.x, top: geo.get(dealer.id)!.button.y }}>D</div>
-          )}
 
           {s.seats.map(seat => {
             const g = geo.get(seat.id)!;
@@ -285,6 +307,7 @@ export function Table({ poker }: { poker: Poker }) {
                 )}
                 <div className="avatar" style={{ '--hue': hueOf(seat.name) } as Vars}>
                   {initials(seat.name)}
+                  {dealer?.id === seat.id && <span className="dealer-btn" aria-label="Dealer">D</span>}
                   {acting && s.turnMsLeft != null && (
                     <TimerRing key={`${s.handNo}-${s.street}-${s.currentBet}-${seat.id}-${bjMoves}`} left={s.turnMsLeft} total={s.turnMsTotal} />
                   )}
@@ -349,6 +372,9 @@ export function Table({ poker }: { poker: Poker }) {
 
 const PAIR_COLORS = ['#e8c45c', '#5cc8e8', '#e85c9a'];
 
+/** Your cards shrink on short screens so the table above keeps enough room for the seats and boards. */
+const heightCap = () => (window.innerHeight < 760 ? Math.max(48, Math.floor(window.innerHeight * 0.1)) : Infinity);
+
 function pendingTitle(kind: string, count: number, everyone = false): string {
   if (kind === 'arrange') return everyone ? 'Everyone is making their pairs' : 'Make your 3 pairs: tap 2 cards, then 2 more';
   if (kind === 'drop_pair') return everyone ? 'Everyone drops a pair' : 'Tap the pair you want to drop';
@@ -363,7 +389,7 @@ function MyCards({ s, me, picked, onTap, delay }: {
   const choosing = !!p && !s.myReady && !me.folded;
   const up = peek || choosing || !!me.handName;
   const n = me.cards.length;
-  const width = Math.min(window.innerWidth > 700 ? 100 : 80, Math.floor((Math.min(window.innerWidth, 560) - 48) / (n * 0.92 + 0.2)));
+  const width = Math.min(window.innerWidth > 700 ? 100 : 80, heightCap(), Math.floor((Math.min(window.innerWidth, 560) - 48) / (n * 0.92 + 0.2)));
   const arranging = choosing && p!.kind === 'arrange';
   const grouped = s.pairs && !arranging && n > 2; // show locked pairs with a gap between them
   const pairOf = (i: number): number | null => {
@@ -411,7 +437,9 @@ function SplitCards({ s, me, send, delay }: { s: TableView; me: SeatView; send: 
   const n = cards.length;
   const canSwap = s.phase === 'playing' && !me.folded;
   const up = peek || swapping || !!me.handName;
-  const width = Math.min(window.innerWidth > 700 ? 92 : 76, Math.floor((Math.min(window.innerWidth, 560) - 64) / (n * 0.95 + 0.2)));
+  // Short screens: smaller cards and a small swap button between the hands, so the table keeps its height.
+  const short = window.innerHeight < 700;
+  const width = Math.min(window.innerWidth > 700 ? 92 : 76, Math.floor(heightCap() * (short ? 0.68 : 0.8)), Math.floor((Math.min(window.innerWidth, 560) - 64) / (n * 0.95 + 0.2)));
   const groupOf = (i: number) => (i < split.sizes[0] ? 0 : 1);
   useEffect(() => { if (!canSwap) { setSwapping(false); setSel(null); } }, [canSwap]);
 
@@ -424,13 +452,20 @@ function SplitCards({ s, me, send, delay }: { s: TableView; me: SeatView; send: 
     setSel(null);
   };
   const groups = [[...Array(split.sizes[0]).keys()], [...Array(n - split.sizes[0]).keys()].map(k => k + split.sizes[0])];
+  const toggleSwap = () => { setSwapping(!swapping); setSel(null); setPeek(true); };
+  const swapHint = sel == null ? 'Tap a card to move · Done' : 'Now tap a card in the other hand';
 
   return (
     <div className={`split-hand ${me.folded ? 'folded' : ''}`}>
       <div className={`my-cards split ${up ? 'up' : ''}`}
         onClick={() => { if (!swapping) setPeek(v => !v); }} onContextMenu={e => e.preventDefault()}>
         {groups.map((idxs, g) => (
-          <div key={g} className="split-group">
+          <Fragment key={g}>
+          {g === 1 && short && canSwap && (
+            <button className={`swap-mini ${swapping ? 'on' : ''}`} aria-label={swapping ? 'Done swapping' : 'Swap cards'}
+              onClick={e => { e.stopPropagation(); toggleSwap(); }}>{swapping ? '✓' : '⇄'}</button>
+          )}
+          <div className="split-group">
             <div className="split-cards">
               {idxs.map(i => (
                 <div key={i} className="my-card deal-up" style={{ animationDelay: `${delay + i * 0.12}s` }} onClick={() => tap(i)}>
@@ -442,12 +477,14 @@ function SplitCards({ s, me, send, delay }: { s: TableView; me: SeatView; send: 
             </div>
             <div className={`split-label ${s.split === 'highlow' && g === 1 ? 'low' : ''}`}>{split.labels[g]}</div>
           </div>
+          </Fragment>
         ))}
         {!up && !me.folded && <div className="peek-hint">Tap to look</div>}
+        {short && swapping && <div className="peek-hint">{swapHint}</div>}
       </div>
-      {canSwap && (
-        <button className={`pill swap-btn ${swapping ? 'on' : ''}`} onClick={() => { setSwapping(!swapping); setSel(null); setPeek(true); }}>
-          {swapping ? (sel == null ? 'Tap a card to move · Done' : 'Now tap a card in the other hand') : '⇄ Swap cards'}
+      {canSwap && !short && (
+        <button className={`pill swap-btn ${swapping ? 'on' : ''}`} onClick={toggleSwap}>
+          {swapping ? swapHint : '⇄ Swap cards'}
         </button>
       )}
     </div>
