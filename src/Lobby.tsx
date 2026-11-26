@@ -109,6 +109,12 @@ export function Lobby({ poker }: { poker: Poker }) {
         <button className="btn outline" disabled={!nameOk} onClick={() => go(bots)}>Play now</button>
       </section>
 
+      <footer className="credits">
+        Made by Satwik Medipalli · <a href="https://satwikmedipalli.dev" target="_blank" rel="noreferrer">Portfolio</a> ·{' '}
+        <a href="https://github.com/satwikmedipalli" target="_blank" rel="noreferrer">GitHub</a> ·{' '}
+        <a href="https://linkedin.com/in/medipalli-satwik" target="_blank" rel="noreferrer">LinkedIn</a>
+      </footer>
+
       {poker.error && <div className="toast" onClick={poker.clearError}>{poker.error}</div>}
     </div>
   );

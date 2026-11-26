@@ -768,3 +768,7 @@ input[type=range] { width: 100%; accent-color: var(--pink); height: 28px; }
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
   .fireworks, .jackpot { display: none; }
 }
+
+.credits { text-align: center; color: var(--muted); font-size: 13px; padding: 18px 0 8px; }
+.credits a { color: var(--cyan-2); text-decoration: none; text-shadow: 0 0 8px rgba(25,232,255,.5); }
+.credits a:hover { color: var(--pink-2); text-shadow: 0 0 8px rgba(255,43,214,.6); }
